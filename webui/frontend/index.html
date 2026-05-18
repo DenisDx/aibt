@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>aibt</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0f1117;
+      --panel:   #1a1d27;
+      --border:  #2a2d3a;
+      --accent:  #5b8af7;
+      --text:    #d0d4e8;
+      --muted:   #6b7090;
+      --ok:      #4caf86;
+      --warn:    #f0a500;
+      --err:     #e05555;
+      --font:    'Segoe UI', system-ui, sans-serif;
+      --mono:    'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    }
+
+    body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── Screens ────────────────────────────────────────────── */
+    .screen { display: none; }
+    .screen.active { display: flex; flex-direction: column; height: 100vh; }
+
+    /* ── Login ──────────────────────────────────────────────── */
+    #screen-login { align-items: center; justify-content: center; }
+    .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 40px; width: 340px; display: flex; flex-direction: column; gap: 14px; }
+    .login-box h1 { font-size: 22px; font-weight: 600; color: var(--accent); text-align: center; margin-bottom: 4px; }
+    .login-box label { font-size: 12px; color: var(--muted); margin-bottom: 2px; display: block; }
+    .login-box input { width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; outline: none; transition: border-color .2s; }
+    .login-box input:focus { border-color: var(--accent); }
+    .login-box button { padding: 10px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; margin-top: 4px; transition: opacity .2s; }
+    .login-box button:hover { opacity: .85; }
+    #login-error { color: var(--err); font-size: 12px; text-align: center; min-height: 16px; }
+
+    /* ── App layout ─────────────────────────────────────────── */
+    #screen-app { flex-direction: column; }
+
+    /* ── Nav ────────────────────────────────────────────────── */
+    nav { background: var(--panel); border-bottom: 1px solid var(--border); padding: 0 20px; height: 48px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .nav-brand { font-size: 18px; font-weight: 700; color: var(--accent); margin-right: 16px; }
+    .nav-tab { background: none; border: none; color: var(--muted); font-size: 13px; padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: color .2s, background .2s; }
+    .nav-tab:hover { color: var(--text); background: rgba(255,255,255,.05); }
+    .nav-tab.active { color: var(--text); background: rgba(91,138,247,.12); }
+    .nav-spacer { flex: 1; }
+    #svc-badge { font-size: 11px; padding: 3px 9px; border-radius: 12px; font-weight: 600; background: rgba(76,175,134,.15); color: var(--ok); border: 1px solid rgba(76,175,134,.3); }
+    #svc-badge.warn { background: rgba(240,165,0,.15); color: var(--warn); border-color: rgba(240,165,0,.3); }
+    #svc-badge.err  { background: rgba(224,85,85,.15);  color: var(--err);  border-color: rgba(224,85,85,.3); }
+    .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-danger { border-color: rgba(224,85,85,.4); color: var(--err); }
+    .btn-danger:hover { border-color: var(--err); }
+    .nav-whoami { color: var(--muted); font-size: 12px; }
+
+    /* ── Restart banner ─────────────────────────────────────── */
+    #restart-banner { display: none; background: rgba(240,165,0,.12); border-bottom: 1px solid rgba(240,165,0,.3); padding: 8px 20px; font-size: 13px; color: var(--warn); align-items: center; gap: 8px; }
+    #restart-banner.visible { display: flex; }
+    .dot-anim { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+    /* ── Page area ──────────────────────────────────────────── */
+    .page-area { flex: 1; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+    .page { display: none; flex-direction: column; gap: 16px; }
+    .page.active { display: flex; }
+
+    /* ── Status grid ────────────────────────────────────────── */
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+    .status-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+    .card-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .card-value { font-size: 15px; font-weight: 600; }
+    .card-value.ok   { color: var(--ok); }
+    .card-value.warn { color: var(--warn); }
+    .card-value.err  { color: var(--err); }
+    .card-value.muted{ color: var(--muted); }
+
+    /* ── Log panel ──────────────────────────────────────────── */
+    .log-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; flex: 1; min-height: 300px; }
+    .log-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .log-toolbar label { font-size: 12px; color: var(--muted); }
+    .log-toolbar select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+    .log-toolbar input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+    .log-spacer { flex: 1; }
+    #log-output { flex: 1; padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--text); overflow: auto; white-space: pre-wrap; word-break: break-all; min-height: 240px; }
+
+    /* log level colorization */
+    .log-output-wrap { flex: 1; overflow: auto; }
+
+    /* ── Agent page ────────────────────────────────────────── */
+    .agent-layout { display: grid; grid-template-columns: minmax(260px, 320px) 1fr; gap: 12px; }
+    .agent-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .agent-meta { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+    .agent-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .agent-stat { background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+    .agent-stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .agent-stat .v { font-size: 14px; color: var(--text); }
+    .chat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-height: 420px; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-head { border-bottom: 1px solid var(--border); padding: 10px 14px; color: var(--muted); font-size: 12px; }
+    .chat-body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .chat-msg { max-width: min(82%, 900px); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+    .chat-msg.user { align-self: flex-end; background: rgba(91,138,247,.15); border-color: rgba(91,138,247,.35); }
+    .chat-msg.agent { align-self: flex-start; background: rgba(255,255,255,.03); }
+    .chat-msg.system { align-self: center; color: var(--muted); font-size: 12px; border-style: dashed; }
+    .chat-form { border-top: 1px solid var(--border); padding: 10px; display: flex; gap: 8px; }
+    .chat-form input { flex: 1; min-width: 120px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; }
+
+    @media (max-width: 900px) {
+      .agent-layout { grid-template-columns: 1fr; }
+      .chat-card { min-height: 360px; }
+      .chat-msg { max-width: 95%; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Login screen ──────────────────────────────────────────────────────── -->
+<div id="screen-login" class="screen">
+  <div class="login-box">
+    <h1>aibt</h1>
+    <div>
+      <label for="inp-login">Login</label>
+      <input id="inp-login" type="text" autocomplete="username" placeholder="admin">
+    </div>
+    <div>
+      <label for="inp-pass">Password</label>
+      <input id="inp-pass" type="password" autocomplete="current-password" placeholder="••••••">
+    </div>
+    <div id="login-error"></div>
+    <button onclick="login()">Sign in</button>
+  </div>
+</div>
+
+<!-- ── App screen ────────────────────────────────────────────────────────── -->
+<div id="screen-app" class="screen">
+  <nav>
+    <span class="nav-brand">aibt</span>
+    <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
+    <button class="nav-tab" onclick="showPage('agent')">Agent</button>
+    <button class="nav-tab" onclick="showPage('langgraph')">LangGraph</button>
+    <button class="nav-tab" onclick="showPage('settings')" title="Coming in a future phase">Settings</button>
+    <span class="nav-spacer"></span>
+    <span id="svc-badge">Online</span>
+    <button class="btn btn-danger" onclick="restartService()">Restart</button>
+    <span class="nav-whoami" id="nav-whoami"></span>
+    <button class="btn" onclick="logout()">Log out</button>
+  </nav>
+
+  <div id="restart-banner">
+    <span class="dot-anim"></span>
+    Service is restarting — page will reconnect automatically.
+  </div>
+
+  <div class="page-area">
+
+
+    <!-- Dashboard page -->
+    <div id="page-dashboard" class="page active">
+      <div class="status-grid" id="status-grid">
+        <div class="status-card">
+          <div class="card-label">Service</div>
+          <div class="card-value ok" id="card-service">Online</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">Agents</div>
+          <div class="card-value" id="card-agents">—</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">MCP</div>
+          <div class="card-value muted">N/A</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">Memory</div>
+          <div class="card-value muted">N/A</div>
+        </div>
+      </div>
+
+      <div class="log-panel">
+        <div class="log-toolbar">
+          <label for="log-type-sel">Log:</label>
+          <select id="log-type-sel" onchange="onLogTypeChange()"></select>
+          <label><input type="checkbox" id="chk-autoupdate" checked> Live</label>
+          <label><input type="checkbox" id="chk-autoscroll" checked> Auto-scroll</label>
+          <span class="log-spacer"></span>
+          <button class="btn" onclick="refreshLog()">↺ Refresh</button>
+        </div>
+        <pre id="log-output"></pre>
+      </div>
+    </div>
+
+    <!-- Agent page -->
+    <div id="page-agent" class="page">
+      <div class="agent-layout">
+        <div class="agent-card">
+          <label for="agent-page-select">Agent</label>
+          <select id="agent-page-select" onchange="onAgentSelectionChange()"></select>
+          <div class="agent-meta" id="agent-meta">No data</div>
+          <div class="agent-stats" id="agent-stats"></div>
+          <button class="btn" onclick="loadAgentPage(true)">Refresh Agent Data</button>
+        </div>
+
+        <div class="chat-card">
+          <div class="chat-head" id="agent-chat-head">Dialogue</div>
+          <div class="chat-body" id="agent-chat-body"></div>
+          <form class="chat-form" onsubmit="return submitAgentMessage(event)">
+            <input id="agent-chat-input" type="text" placeholder="Type your message to selected agent..." autocomplete="off">
+            <button class="btn" type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- LangGraph page -->
+    <div id="page-langgraph" class="page">
+      <div class="status-grid">
+        <div class="status-card">
+          <div class="card-label">LangGraph Status</div>
+          <div class="card-value" id="lg-status">—</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">Bind</div>
+          <div class="card-value" id="lg-bind">—</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">PID</div>
+          <div class="card-value" id="lg-pid">—</div>
+        </div>
+        <div class="status-card">
+          <div class="card-label">API URL</div>
+          <div class="card-value" id="lg-url" style="font-size:12px">—</div>
+        </div>
+      </div>
+
+      <div class="status-card" style="max-width:900px;gap:10px;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <button class="btn" onclick="restartLangGraph()">Restart LangGraph Dev</button>
+          <button class="btn" onclick="loadLangGraphPage()">Refresh Status</button>
+          <button class="btn" onclick="openLangGraphStudio()">Open Studio</button>
+          <button class="btn" onclick="openLangGraphDocs()">Open API Docs</button>
+          <button class="btn" onclick="copyLangGraphApiUrl()">Copy API URL</button>
+        </div>
+        <div class="card-value muted" id="lg-msg" style="font-size:12px;font-weight:400;"></div>
+      </div>
+
+      <div class="log-panel">
+        <div class="log-toolbar">
+          <label>LangGraph Dev Log</label>
+          <span class="log-spacer"></span>
+          <button class="btn" onclick="refreshLangGraphLogs()">↺ Refresh</button>
+        </div>
+        <pre id="lg-log-output"></pre>
+      </div>
+    </div>
+
+    <!-- Settings page (placeholder) -->
+    <div id="page-settings" class="page">
+      <div class="status-card" style="max-width:400px">
+        <div class="card-label">Settings</div>
+        <div class="card-value muted" style="font-size:13px;font-weight:400;margin-top:4px">Available in a future phase.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

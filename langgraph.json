@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "aibt_orchestrator": "./src/orchestrator/langgraph_entry.py:graph"
+  },
+  "env": ".env"
+}

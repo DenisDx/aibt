@@ -1,0 +1,52 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+pip-wheel-metadata/
+.Python
+
+# Virtual envs
+.venv/
+env/
+ENV/
+
+# Runtime / private data
+.env
+config.json5
+logs/
+sessions/
+data/
+
+# LangGraph
+.langgraph_api/
+langgraph-dev.pid
+logs/langgraph-dev.*
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+memory/
+AGENTS.md
+SPEC.md
+
+# Docker
+docker/volumes/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+

@@ -1,0 +1,161 @@
+{
+  // aibt configuration example.
+  // Copy this file to config.json5 and adjust as needed.
+  // Private/machine-specific values are loaded from .env via ${VAR:-default} placeholders.
+
+  "version": "1.0",
+  "title": "aibt 1",
+
+  // Unique instance identifier (matches service name and docker container names).
+  "instance": "${AIBT_INSTANCE:-aibt}",
+
+  // Absolute path to project root. Set automatically by install.sh.
+  "root": "${AIBT_ROOT}",
+
+  // How often cron.py is expected to be invoked, in seconds.
+  "cron_period": ${CRON_PERIOD:-60},
+
+  "logging": {
+    // Default log level for all subsystems. String or int (0-7, systemd-journald scale).
+    // 0=emergency 1=alert 2=critical 3=error 4=warning 5=notice 6=info 7=debug
+    "level": "${LOG_LEVEL:-info}",
+
+    // Timezone for log timestamps.
+    // "local" = server local timezone, "UTC", or IANA zone name (e.g. "Europe/Moscow").
+    "timezone": "${LOG_TIMEZONE:-local}",
+
+    // Seconds between log wipe runs. 0 = never wipe.
+    "wipe_period": ${LOG_WIPE_PERIOD:-3600},
+
+    // Maximum age of log lines in seconds before they are wiped.
+    "wipe_max_age": ${LOG_WIPE_MAX_AGE:-2592000},
+
+    // Maximum size in bytes for individual log files. 0 = unlimited.
+    "max_log_size": ${MAX_LOG_SIZE:-10485760},
+
+    // Per-subsystem level overrides. Unspecified subsystems use "level" above.
+    "levels": {
+      "core": "info",
+      "webui": "info",
+      "cron": "info",
+      "agents": "warning",
+      "mcp": "warning",
+    },
+  },
+
+  // Agent system configuration (used from phase 2 onward).
+  "agents": {
+    "orchestrator": {
+      "max_retries": 1,
+      "retry_delay_sec": 0.5,
+      "fallback_agent": "echo",
+    },
+    "items": {
+      "echo": { "enabled": true },
+      "math": { "enabled": true },
+      "graph_echo": { "enabled": true },
+      // Example: per-agent config override.
+      // "myagent": {
+      //   "config": {
+      //     "logging": { "levels": { "agents": 3 } }
+      //   }
+      // }
+    },
+  },
+
+  // External MCP servers (used from phase 3 onward).
+  "mcp": {
+    "items": {
+      // "mcp1": {
+      //   "tools_list": ["search", "fetch"],
+      //   "auth": { "token": "${MCP1_TOKEN}" },
+      // }
+    },
+  },
+
+  // LLM provider definitions (used from phase 2 onward).
+  "models": {
+    "active_provider": "default",
+    "active_model": "${LLM_MODEL:-gpt-4o-mini}",
+    "providers": {
+      "default": {
+        "baseUrl": "${LLM_BASE_URL:-https://api.openai.com/v1}",
+        "apiKey": "${LLM_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "${LLM_MODEL:-gpt-4o-mini}", "name": "${LLM_MODEL:-gpt-4o-mini}" }
+        ]
+      }
+    },
+  },
+
+  // Web UI configuration.
+  "webui": {
+    "port": ${WEBUI_PORT:-50080},
+    "bind": "${WEBUI_HOST:-0.0.0.0}",
+    "auth": {
+      "mode": "login",
+      "session_ttl": 86400,
+      "users": [
+        {
+          "login": "${ROOT_USER:-admin}",
+          "password": "${ROOT_PASSWORD:-admin}",
+          "permissions": ["all"],
+        },
+      ],
+    },
+  },
+
+  // Adapter configuration (external integrations: Telegram, Cron, etc).
+  "adapters": {
+    "items": {
+      "telegram": {
+        "enabled": false,  // Set to true and provide TELEGRAM_BOT_TOKEN to enable
+        "token": "${TELEGRAM_BOT_TOKEN}",  // Telegram Bot token from @BotFather
+        "default_agent": "echo",  // Agent to use for Telegram messages
+        "polling": true,  // Use polling (true) or webhook (false)
+        "polling_timeout": 30,  // Polling timeout in seconds
+        // Example with graph_echo agent:
+        // "enabled": true,
+        // "token": "${TELEGRAM_BOT_TOKEN}",
+        // "default_agent": "graph_echo",
+        // "polling": true,
+        // "polling_timeout": 30,
+      },
+      "cron": {
+        "enabled": true,
+      },
+    },
+  },
+
+  // Cron adapter configuration (for scheduled task execution).
+  "cron": {
+    "enabled": true,
+    "tasks": [
+      // Example scheduled task (requires schedule parsing):
+      // {
+      //   "name": "daily_math",
+      //   "enabled": true,
+      //   "agent": "math",
+      //   "schedule": "0 9 * * *",  // daily at 09:00 (cron syntax)
+      //   "message": "Calculate the answer to the universe"
+      // },
+      // {
+      //   "name": "hourly_check",
+      //   "enabled": false,
+      //   "agent": "echo",
+      //   "schedule": "0 * * * *",  // every hour
+      //   "message": "System check"
+      // }
+    ],
+  },
+
+  // PostgreSQL connection (used from phase 4 onward; container is set up in phase 1).
+  "database": {
+    "host": "${PG_HOST:-127.0.0.1}",
+    "port": ${PG_PORT:-5432},
+    "user": "${PG_USER:-aibt}",
+    "password": "${PG_PASSWORD}",
+    "db": "${PG_DB:-aibt}",
+  },
+}
