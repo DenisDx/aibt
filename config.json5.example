@@ -115,12 +115,18 @@
         "default_agent": "echo",  // Agent to use for Telegram messages
         "polling": true,  // Use polling (true) or webhook (false)
         "polling_timeout": 30,  // Polling timeout in seconds
+        "listen_private": true,  // Listen to private chats
+        "listen_groups": true,  // Listen to groups/supergroups where bot is added
+        "dialog_log_type": "telegram_dialog",  // Dedicated file logs/<dialog_log_type>.log with input+reaction pairs
         // Example with graph_echo agent:
         // "enabled": true,
         // "token": "${TELEGRAM_BOT_TOKEN}",
         // "default_agent": "graph_echo",
         // "polling": true,
         // "polling_timeout": 30,
+        // "listen_private": true,
+        // "listen_groups": true,
+        // "dialog_log_type": "telegram_dialog",
       },
       "cron": {
         "enabled": true,
