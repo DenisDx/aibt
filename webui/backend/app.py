@@ -18,6 +18,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -409,7 +410,7 @@ class WebUIServer:
 
         @app.post("/api/agents/query")
         async def api_agents_query(body: dict[str, Any], session: dict = Depends(require)):
-            """Submit a query to an agent via WebUIAdapter. Returns result."""
+            """Submit a query to an agent via WebUIAdapter. Returns task id."""
             agent = str(body.get("agent", "")).strip()
             query = str(
                 body.get("query")
@@ -424,11 +425,25 @@ class WebUIServer:
             if not query:
                 raise HTTPException(status_code=400, detail="query is required")
             try:
-                result = await self.webui_adapter.handle(user_id, agent, query, context={"session": session})
+                result = await self.webui_adapter.handle(
+                    user_id,
+                    agent,
+                    query,
+                    context={"session": session},
+                )
             except Exception as e:
+                log(
+                    "webui",
+                    "error",
+                    f"Agent query submit failed for agent={agent} user={user_id}: {e}\n{traceback.format_exc()}",
+                )
                 raise HTTPException(status_code=500, detail=str(e))
-            log("webui", "info", f"WebUIAdapter query: {agent} by {user_id}")
-            return {"ok": True, "result": result}
+            log(
+                "webui",
+                "info",
+                f"Submitted agent task {result.get('task_id', '')} for agent={agent} user={user_id}",
+            )
+            return {"ok": True, **result}
 
         @app.get("/api/agents/status")
         async def api_agents_status(task_id: str, session: dict = Depends(require)):

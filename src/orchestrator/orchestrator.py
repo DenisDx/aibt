@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, TypedDict
@@ -11,6 +12,7 @@ from langgraph.graph import END, StateGraph
 from agents.echo.agent import EchoAgent
 from agents.math.agent import MathAgent
 from agents.graph_echo.agent import GraphEchoAgent
+from core.logging_utils import log
 
 
 class OrchestratorState(TypedDict, total=False):
@@ -138,6 +140,12 @@ class AgentOrchestrator:
             retries = int(state.get("retries", 0))
             max_retries = int(state.get("max_retries", 1))
             fallback_agent = str(state.get("fallback_agent", "")).strip()
+            log(
+                "core",
+                "error",
+                f"Task {task_id} failed in agent={agent_name} on retry={retries}: {e}\n{traceback.format_exc()}",
+                tag="orchestrator",
+            )
             self._set_task(task_id, status="retrying", result={"error": str(e), "retries": retries})
 
             if retries < max_retries:
@@ -182,6 +190,12 @@ class AgentOrchestrator:
             self._set_task(task_id, status="done", result={"via_fallback": fallback_agent, **result})
             return {"status": "done", "result": {"via_fallback": fallback_agent, **result}}
         except Exception as e:
+            log(
+                "core",
+                "error",
+                f"Task {task_id} fallback agent={fallback_agent} failed: {e}\n{traceback.format_exc()}",
+                tag="orchestrator",
+            )
             self._set_task(task_id, status="error", result={"error": str(e)})
             return {"status": "error", "error": str(e)}
 
@@ -267,6 +281,12 @@ class AgentOrchestrator:
             "fallback_agent": str(orch_cfg.get("fallback_agent", "echo")),
         }
         try:
+            log(
+                "core",
+                "info",
+                f"Starting task {task_id} for agent={agent_name}",
+                tag="orchestrator",
+            )
             final_state = await self.graph.ainvoke(initial)
             if final_state.get("status") == "done":
                 self._set_task(
@@ -283,4 +303,10 @@ class AgentOrchestrator:
                     retries=int(final_state.get("retries", self.tasks[task_id].get("retries", 0))),
                 )
         except Exception as e:
+            log(
+                "core",
+                "error",
+                f"Task runner crashed for task {task_id} agent={agent_name}: {e}\n{traceback.format_exc()}",
+                tag="orchestrator",
+            )
             self._set_task(task_id, status="error", result={"error": str(e)})
