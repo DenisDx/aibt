@@ -3,6 +3,7 @@ TelegramAdapter: Adapter for Telegram bot integration (unified interface).
 Handles incoming messages from Telegram users and routes them to agents via orchestrator.
 """
 import asyncio
+import traceback
 from typing import Any
 from adapters.adapter import Adapter
 from core.logging_utils import log
@@ -42,12 +43,18 @@ class TelegramAdapter(Adapter):
         
         self.app = None
         self.bot = None
+        self._stop_event = asyncio.Event()
+        self._polling_active = False
         
         if self.enabled and self.token and Bot:
             self.bot = Bot(token=self.token)
             log("adapters.telegram", "info", f"TelegramAdapter initialized (token={'***' + self.token[-4:]}, polling={self.polling}, timeout={self.polling_timeout}s)")
         elif self.enabled:
-            log("adapters.telegram", "error", "TelegramAdapter enabled but no token or python-telegram-bot not installed")
+            log(
+                "adapters.telegram",
+                "error",
+                f"TelegramAdapter enabled but cannot start (has_token={bool(self.token)}, dependency_ready={bool(Bot and Application and ChatAction)})",
+            )
 
 
     async def handle(self, user_id: str, agent_id: str, message: str, context: dict = None) -> dict:
@@ -149,24 +156,68 @@ class TelegramAdapter(Adapter):
         if not self.enabled or not Application:
             log("adapters.telegram", "warning", "Telegram adapter not enabled or dependencies missing")
             return
+        if not self.polling:
+            log("adapters.telegram", "warning", "Telegram adapter is configured without polling support")
+            return
+        if self._polling_active:
+            log("adapters.telegram", "warning", "Telegram polling start requested while already active")
+            return
         
         # Create Application and pass bot to it
         self.app = Application.builder().token(self.token).build()
+        self._stop_event.clear()
         
         # Add handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(CommandHandler("start", self._handle_start))
         
-        log("adapters.telegram", "info", f"starting polling (timeout={self.polling_timeout}s)")
+        log("adapters.telegram", "info", f"starting polling (timeout={self.polling_timeout}s, agent={self.default_agent})")
         try:
-            async with self.app:
-                await self.app.start()
-                log("adapters.telegram", "info", "polling started, listening for messages")
-                await self.app.updater.start_polling(allowed_updates=Update.ALL_TYPES, read_timeout=self.polling_timeout)
-                await self.app.updater.stop()
-                await self.app.stop()
+            await self.app.initialize()
+            log("adapters.telegram", "debug", "Telegram application initialized")
+            await self.app.start()
+            log("adapters.telegram", "debug", "Telegram application started")
+            if not self.app.updater:
+                raise RuntimeError("Telegram updater is unavailable")
+            await self.app.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                timeout=self.polling_timeout,
+            )
+            self._polling_active = True
+            log("adapters.telegram", "info", "polling started, listening for messages")
+            await self._stop_event.wait()
+            log("adapters.telegram", "notice", "polling stop requested")
         except Exception as e:
-            log("adapters.telegram", "error", f"polling error: {e}")
+            log("adapters.telegram", "error", f"polling error: {e}\n{traceback.format_exc()}")
+            raise
+        finally:
+            self._polling_active = False
+            if self.app:
+                try:
+                    if self.app.updater and self.app.updater.running:
+                        await self.app.updater.stop()
+                        log("adapters.telegram", "debug", "Telegram updater stopped")
+                except Exception as e:
+                    log("adapters.telegram", "error", f"failed to stop updater: {e}\n{traceback.format_exc()}")
+                try:
+                    if self.app.running:
+                        await self.app.stop()
+                        log("adapters.telegram", "debug", "Telegram application stopped")
+                except Exception as e:
+                    log("adapters.telegram", "error", f"failed to stop application: {e}\n{traceback.format_exc()}")
+                try:
+                    await self.app.shutdown()
+                    log("adapters.telegram", "debug", "Telegram application shutdown completed")
+                except Exception as e:
+                    log("adapters.telegram", "error", f"failed to shutdown application: {e}\n{traceback.format_exc()}")
+            self.app = None
+
+    async def stop(self) -> None:
+        """Request Telegram polling shutdown and wait for current loop cleanup."""
+        if not self.enabled:
+            return
+        log("adapters.telegram", "notice", "Telegram adapter stop requested")
+        self._stop_event.set()
 
     async def _handle_message(self, update: "Update", context) -> None:
         """Internal handler for text messages."""
@@ -178,7 +229,7 @@ class TelegramAdapter(Adapter):
         username = update.effective_user.username or f"user_{chat_id}"
         text = update.message.text
         
-        log("adapters.telegram", "debug", f"message handler: user {username} ({chat_id})")
+        log("adapters.telegram", "debug", f"message handler: user {username} ({chat_id}), text_len={len(text)}")
         
         try:
             # Route message through adapter
@@ -192,11 +243,11 @@ class TelegramAdapter(Adapter):
             log("adapters.telegram", "debug", f"sending response to user {username}")
             await self.send_message(chat_id, str(response_text))
         except Exception as e:
-            log("adapters.telegram", "error", f"error handling message from user {username}: {e}")
+            log("adapters.telegram", "error", f"error handling message from user {username}: {e}\n{traceback.format_exc()}")
             try:
                 await self.send_message(chat_id, f"Error: {str(e)[:100]}")
             except Exception as send_err:
-                log("adapters.telegram", "error", f"failed to send error message: {send_err}")
+                log("adapters.telegram", "error", f"failed to send error message: {send_err}\n{traceback.format_exc()}")
 
     async def _handle_start(self, update: "Update", context) -> None:
         """Internal handler for /start command."""
@@ -206,4 +257,4 @@ class TelegramAdapter(Adapter):
         try:
             await update.message.reply_text(f"Hi! I'm an agent bot. Ask me anything! Default agent: {self.default_agent}")
         except Exception as e:
-            log("adapters.telegram", "error", f"failed to send /start reply to user {username}: {e}")
+            log("adapters.telegram", "error", f"failed to send /start reply to user {username}: {e}\n{traceback.format_exc()}")

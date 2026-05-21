@@ -125,6 +125,7 @@ class WebUIServer:
         self.started_event = asyncio.Event()
         self._restart_loop_time: float = 0.0
         self._server: Optional[uvicorn.Server] = None
+        self._telegram_task: Optional[asyncio.Task] = None
         self.app = self._build_app()
 
         # Multi-agent orchestrator
@@ -509,6 +510,14 @@ class WebUIServer:
         self._server = uvicorn.Server(cfg)
         log("webui", "info", f"Starting WebUI on {self.host}:{self.port}")
 
+        def _telegram_done(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                log("webui", "notice", "Telegram polling task cancelled")
+            except Exception as e:
+                log("webui", "error", f"Telegram polling task crashed: {e}\n{traceback.format_exc()}")
+
         async def _watch() -> None:
             while self._server and not self._server.started and not self._server.should_exit:
                 await asyncio.sleep(0.05)
@@ -517,12 +526,24 @@ class WebUIServer:
                 log("webui", "info", f"WebUI ready at http://{self.host}:{self.port}")
                 # Start Telegram polling if enabled
                 if self.telegram_adapter.enabled:
-                    asyncio.create_task(self.telegram_adapter.start_polling())
+                    log("webui", "info", "Starting Telegram polling task")
+                    self._telegram_task = asyncio.create_task(self.telegram_adapter.start_polling(), name="aibt-telegram-polling")
+                    self._telegram_task.add_done_callback(_telegram_done)
+                else:
+                    log("webui", "info", "Telegram polling disabled by configuration")
 
         asyncio.create_task(_watch())
         await self._server.serve()
 
     async def stop(self) -> None:
         """Signal uvicorn to shut down gracefully."""
+        await self.telegram_adapter.stop()
+        if self._telegram_task and not self._telegram_task.done():
+            try:
+                await asyncio.wait_for(self._telegram_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                log("webui", "warning", "Telegram polling task did not stop in time; cancelling")
+                self._telegram_task.cancel()
+                await asyncio.gather(self._telegram_task, return_exceptions=True)
         if self._server:
             self._server.should_exit = True
