@@ -16,7 +16,9 @@ class MathAgent(AgentBase):
                 (
                     "system",
                     "You are MathAgent. Solve arithmetic tasks accurately. "
-                    "Return concise answer. If expression is invalid, explain error.",
+                    "Return concise answer. If expression is invalid, explain error. "
+                    "If memory context includes relevant formulas or constraints, use them. "
+                    "Do not print memory context directly.\n{memory_context}",
                 ),
                 ("human", "{query}"),
             ]

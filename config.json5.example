@@ -54,6 +54,13 @@
       "echo": { "enabled": true },
       "math": { "enabled": true },
       "graph_echo": { "enabled": true },
+      // Example per-agent corpus allowlist.
+      // "researcher": {
+      //   "enabled": true,
+      //   "rag": {
+      //     "corpora": ["shared", "research-private"]
+      //   }
+      // },
       // Example: per-agent config override.
       // "myagent": {
       //   "config": {
@@ -86,6 +93,53 @@
           { "id": "${LLM_MODEL:-gpt-4o-mini}", "name": "${LLM_MODEL:-gpt-4o-mini}" }
         ]
       }
+    },
+  },
+
+  // Memory and RAG configuration.
+  "memory": {
+    "enabled": true,
+
+    // All internal memory data and indexes stay under project root.
+    "path": "memory/runtime",
+
+    // External document storages. Agents access documents only via memory API tools.
+    "document_storages": {
+      "items": {
+        "default": {
+          "type": "filesystem",
+          "root": "${AIBT_ROOT}/data/documents_external",
+          "read_only": false,
+        },
+      },
+    },
+
+    "rag": {
+      "enabled": true,
+      "ingest": {
+        // Process queued jobs only in cron, while system is mostly idle.
+        "max_jobs_per_tick": 3,
+        "chunk_size": 1200,
+        "chunk_overlap": 120,
+      },
+      "retrieval": {
+        "default_limit": 8,
+        "embedding_dim": 256,
+        "lexical_weight": 0.45,
+        "dense_weight": 0.55,
+        "lexical_top_k": 32,
+        "dense_top_k": 32,
+      },
+    },
+
+    "langmem": {
+      "enabled": true,
+      "summary_inactive_after_hours": 24,
+      "archive_after_hours": 72,
+      "retain_recent_episodes": 150,
+      "min_semantic_importance": 0.7,
+      "max_semantic_promotions_per_tick": 8,
+      "max_archives_per_tick": 8,
     },
   },
 

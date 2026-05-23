@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.logging_utils import log, register_log_listener, unregister_log_listener
+from memory.api import get_memory_service
 
 
 def _utcnow() -> datetime:
@@ -103,6 +104,25 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class MemorySearchRequest(BaseModel):
+    query: str
+    corpora: list[str] | None = None
+    filters: dict[str, Any] | None = None
+    limit: int = 8
+    agent: str | None = None
+
+
+class MemoryIngestRequest(BaseModel):
+    source: dict[str, Any]
+    corpus_id: str
+    title: str | None = None
+    tags: list[str] | None = None
+
+
+class MemoryRunIngestRequest(BaseModel):
+    limit: int | None = None
+
+
 # ── WebUI server ──────────────────────────────────────────────────────────────
 
 class WebUIServer:
@@ -137,6 +157,49 @@ class WebUIServer:
         # Telegram Adapter
         from adapters.telegram.app import TelegramAdapter
         self.telegram_adapter = TelegramAdapter(self.orchestrator, self.config)
+        self.memory_service = get_memory_service(self.root_dir, self.config)
+
+    def _agent_allowed_corpora(self, agent_id: str | None) -> list[str] | None:
+        """Return configured corpus allowlist for agent.
+
+        Input: agent id.
+        Output: list of allowed corpora or None when unrestricted.
+        """
+
+        if not agent_id:
+            return None
+        items = self.config.get("agents", {}).get("items", {})
+        if not isinstance(items, dict):
+            return None
+        a_cfg = items.get(agent_id, {})
+        if not isinstance(a_cfg, dict):
+            return None
+        rag_cfg = a_cfg.get("rag", {})
+        if not isinstance(rag_cfg, dict):
+            return None
+        corpora = rag_cfg.get("corpora")
+        if not isinstance(corpora, list):
+            return None
+        cleaned = [str(x).strip() for x in corpora if str(x).strip()]
+        return cleaned or []
+
+    @staticmethod
+    def _apply_corpus_acl(requested: list[str] | None, allowed: list[str] | None) -> list[str] | None:
+        """Intersect requested corpora with ACL.
+
+        Input: requested corpora and allowed corpora.
+        Output: effective corpora filter or None.
+        """
+
+        if allowed is None:
+            return requested
+        if not requested:
+            return allowed
+        req = [str(x).strip() for x in requested if str(x).strip()]
+        if not req:
+            return allowed
+        allowed_set = set(allowed)
+        return [x for x in req if x in allowed_set]
 
     def _langgraph_cfg(self) -> dict[str, Any]:
         """Return LangGraph runtime config from webui section with defaults."""
@@ -300,11 +363,26 @@ class WebUIServer:
 
         @app.get("/api/status")
         async def api_status(session: dict = Depends(require)):
+            mem_enabled = bool(self.config.get("memory", {}).get("enabled", True))
+            mem_corpora = 0
+            mem_docs = 0
+            if mem_enabled:
+                try:
+                    corpora = self.memory_service.list_corpora()
+                    mem_corpora = len(corpora)
+                    mem_docs = sum(int(c.get("documents", 0) or 0) for c in corpora)
+                except Exception as e:
+                    log("webui", "warning", f"Memory status unavailable: {e}")
             return {
                 "service_state": self._service_state(),
                 "instance": self.config.get("instance", "aibt"),
                 "title": self.config.get("title", "aibt"),
                 "session": {"login": session.get("login", "")},
+                "memory": {
+                    "enabled": mem_enabled,
+                    "corpora": mem_corpora,
+                    "documents": mem_docs,
+                },
             }
 
         @app.get("/api/logs")
@@ -466,6 +544,179 @@ class WebUIServer:
             if not info:
                 return {"ok": False, "error": "agent not found"}
             return {"ok": True, **info}
+
+        # ── Memory / RAG API ───────────────────────────────────────────────
+
+        @app.get("/api/memory/status")
+        async def api_memory_status(session: dict = Depends(require)):
+            enabled = bool(self.config.get("memory", {}).get("enabled", True))
+            if not enabled:
+                return {"ok": True, "enabled": False, "corpora": 0, "documents": 0}
+            try:
+                corpora = self.memory_service.list_corpora()
+                docs = sum(int(c.get("documents", 0) or 0) for c in corpora)
+                return {"ok": True, "enabled": True, "corpora": len(corpora), "documents": docs}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memory/corpora")
+        async def api_memory_corpora(agent: str = "", session: dict = Depends(require)):
+            try:
+                rows = self.memory_service.list_corpora()
+                allowed = self._agent_allowed_corpora(agent.strip() or None)
+                if allowed is not None:
+                    allowed_set = set(allowed)
+                    rows = [r for r in rows if str(r.get("corpus_id", "")) in allowed_set]
+                return {"ok": True, "items": rows}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memory/documents")
+        async def api_memory_documents(
+            corpus_id: str,
+            limit: int = 50,
+            offset: int = 0,
+            q: str = "",
+            tag: str = "",
+            sort_by: str = "updated_at",
+            sort_dir: str = "desc",
+            agent: str = "",
+            session: dict = Depends(require),
+        ):
+            c_id = corpus_id.strip()
+            if not c_id:
+                raise HTTPException(status_code=400, detail="corpus_id is required")
+            allowed = self._agent_allowed_corpora(agent.strip() or None)
+            if allowed is not None and c_id not in set(allowed):
+                raise HTTPException(status_code=403, detail="corpus is not allowed for this agent")
+            try:
+                page = self.memory_service.list_documents(
+                    corpus_id=c_id,
+                    limit=max(1, min(200, int(limit))),
+                    offset=max(0, int(offset)),
+                    query=q,
+                    tag=tag,
+                    sort_by=sort_by,
+                    sort_dir=sort_dir,
+                )
+                return {"ok": True, **page}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory/search")
+        async def api_memory_search(body: MemorySearchRequest, session: dict = Depends(require)):
+            query = body.query.strip()
+            if not query:
+                raise HTTPException(status_code=400, detail="query is required")
+
+            allowed = self._agent_allowed_corpora((body.agent or "").strip() or None)
+            effective_corpora = self._apply_corpus_acl(body.corpora, allowed)
+            try:
+                hits = self.memory_service.search_docs(
+                    query=query,
+                    corpora=effective_corpora,
+                    filters=body.filters,
+                    limit=max(1, min(50, int(body.limit))),
+                )
+                return {"ok": True, "items": hits, "corpora": effective_corpora}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory/ingest")
+        async def api_memory_ingest(body: MemoryIngestRequest, session: dict = Depends(require)):
+            c_id = body.corpus_id.strip()
+            if not c_id:
+                raise HTTPException(status_code=400, detail="corpus_id is required")
+            try:
+                result = self.memory_service.ingest_document(
+                    source=body.source,
+                    corpus_id=c_id,
+                    title=body.title,
+                    tags=body.tags,
+                    requested_by=session.get("login", "webui"),
+                )
+                log(
+                    "webui",
+                    "info",
+                    f"Memory ingest queued by {session.get('login', '?')} corpus={c_id} job={result.get('job_id', '')}",
+                )
+                return {"ok": True, **result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory/ingest/run")
+        async def api_memory_ingest_run(body: MemoryRunIngestRequest, session: dict = Depends(require)):
+            try:
+                requested_limit = body.limit if body.limit is not None else int(
+                    self.config.get("memory", {}).get("rag", {}).get("ingest", {}).get("max_jobs_per_tick", 3)
+                )
+                limit = max(1, min(100, int(requested_limit)))
+                result = self.memory_service.run_ingest_batch(limit=limit)
+                log(
+                    "webui",
+                    "notice",
+                    (
+                        f"Memory ingest batch triggered by {session.get('login', '?')} "
+                        f"limit={limit} processed={result.get('processed', 0)} failed={result.get('failed', 0)}"
+                    ),
+                )
+                return {"ok": True, "limit": limit, **result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memory/document/{doc_id}")
+        async def api_memory_document(doc_id: str, mode: str = "source", version: int | None = None, session: dict = Depends(require)):
+            clean_id = doc_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="doc_id is required")
+            view = mode.strip().lower()
+            if view not in ("source", "text", "summary"):
+                raise HTTPException(status_code=400, detail="mode must be source|text|summary")
+            try:
+                data = self.memory_service.get_document(clean_id, version=version, mode=view)
+                return {"ok": True, "item": data}
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memory/agent/{agent_id}/namespace/{namespace}")
+        async def api_memory_agent_namespace(
+            agent_id: str,
+            namespace: str,
+            limit: int = 100,
+            profile_id: str = "",
+            session: dict = Depends(require),
+        ):
+            clean_agent = agent_id.strip()
+            clean_ns = namespace.strip()
+            if not clean_agent:
+                raise HTTPException(status_code=400, detail="agent_id is required")
+            if not clean_ns:
+                raise HTTPException(status_code=400, detail="namespace is required")
+            try:
+                items = self.memory_service.get_agent_namespace_items(
+                    agent_id=clean_agent,
+                    namespace=clean_ns,
+                    limit=max(1, min(200, int(limit))),
+                    profile_id=profile_id.strip() or None,
+                )
+                return {"ok": True, "items": items}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.delete("/api/memory/document/{doc_id}")
+        async def api_memory_document_delete(doc_id: str, session: dict = Depends(require)):
+            clean_id = doc_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="doc_id is required")
+            try:
+                deleted = self.memory_service.delete_document(clean_id)
+                if deleted:
+                    log("webui", "warning", f"Memory document deleted by {session.get('login', '?')}: {clean_id}")
+                return {"ok": True, "deleted": bool(deleted)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
 
         # WebSocket: stream agent task status/result
         @app.websocket("/ws/agents")

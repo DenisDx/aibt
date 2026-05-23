@@ -14,6 +14,7 @@ if _SRC_DIR not in sys.path:
 
 from core.config import load_config
 from core.logging_utils import init_logging, log
+from memory.cron_tasks import run_memory_cron
 
 
 # Timestamp pattern embedded in log lines: ]YYYY-MM-DD HH:MM:SS.mmm
@@ -138,6 +139,19 @@ def main() -> None:
             _wipe_logs(config, _ROOT_DIR)
             _mark_wiped(_ROOT_DIR)
             log("cron", "info", "Log wipe completed")
+
+        try:
+            memory_result = run_memory_cron(_ROOT_DIR, config)
+            if memory_result.get("enabled"):
+                ingest = memory_result.get("ingest", {})
+                if ingest.get("processed") or ingest.get("failed"):
+                    log(
+                        "cron",
+                        "info",
+                        f"Memory cron done: processed={ingest.get('processed', 0)} failed={ingest.get('failed', 0)}",
+                    )
+        except Exception as e:
+            log("cron", "error", f"Memory cron error: {e}")
 
     except Exception as e:
         log("cron", "error", f"Cron error: {e}")

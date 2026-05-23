@@ -140,6 +140,7 @@
     <span class="nav-brand">aibt</span>
     <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="showPage('agent')">Agent</button>
+    <button class="nav-tab" onclick="showPage('memory')">Memory</button>
     <button class="nav-tab" onclick="showPage('langgraph')">LangGraph</button>
     <button class="nav-tab" onclick="showPage('settings')" title="Coming in a future phase">Settings</button>
     <span class="nav-spacer"></span>
@@ -174,7 +175,7 @@
         </div>
         <div class="status-card">
           <div class="card-label">Memory</div>
-          <div class="card-value muted">N/A</div>
+          <div class="card-value muted" id="card-memory">N/A</div>
         </div>
       </div>
 
@@ -210,6 +211,123 @@
             <button class="btn" type="submit">Send</button>
           </form>
         </div>
+      </div>
+    </div>
+
+    <!-- Memory page -->
+    <div id="page-memory" class="page">
+      <div class="agent-layout">
+        <div class="agent-card">
+          <label for="memory-agent-select">Agent (for corpus ACL)</label>
+          <select id="memory-agent-select" onchange="loadMemoryCorpora()"></select>
+
+          <label for="memory-corpus-select">Corpus</label>
+          <select id="memory-corpus-select" onchange="loadMemoryDocuments()"></select>
+
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn" onclick="loadMemoryPage(true)">Refresh</button>
+            <button class="btn" onclick="loadMemoryDocuments()">Load Docs</button>
+          </div>
+
+          <label for="memory-batch-limit">Manual ingest batch limit</label>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="memory-batch-limit" type="number" min="1" max="100" value="3" style="width:100px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+            <button class="btn" onclick="runMemoryIngestBatch()">Run Ingest Batch</button>
+          </div>
+          <span id="memory-batch-msg" class="nav-whoami"></span>
+
+          <div class="agent-meta" id="memory-meta">Memory status: unknown</div>
+        </div>
+
+        <div class="agent-card">
+          <label for="memory-ingest-corpus">Ingest corpus_id</label>
+          <input id="memory-ingest-corpus" type="text" placeholder="shared" style="padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+
+          <label for="memory-ingest-title">Title (optional)</label>
+          <input id="memory-ingest-title" type="text" placeholder="My document" style="padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+
+          <label for="memory-ingest-text">Inline text source</label>
+          <textarea id="memory-ingest-text" rows="7" placeholder="Paste document text here..." style="padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); resize:vertical;"></textarea>
+
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn" onclick="queueMemoryIngestText()">Queue Ingest</button>
+            <span id="memory-ingest-msg" class="nav-whoami"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="agent-card">
+        <label for="memory-search-query">Search query</label>
+        <div style="display:flex; gap:8px;">
+          <input id="memory-search-query" type="text" placeholder="What to find in documents..." style="flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <button class="btn" onclick="runMemorySearch()">Search</button>
+        </div>
+        <pre id="memory-search-output" style="margin-top:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; min-height:120px; max-height:260px; overflow:auto; font-family:var(--mono);"></pre>
+      </div>
+
+      <div class="agent-card">
+        <div class="chat-head">Agent memory namespaces</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0;">
+          <select id="memory-namespace-agent" onchange="loadMemoryNamespaceItems()" style="min-width:160px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);"></select>
+          <select id="memory-namespace-select" onchange="loadMemoryNamespaceItems()" style="min-width:160px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+            <option value="semantic">semantic</option>
+            <option value="episodic">episodic</option>
+            <option value="procedural">procedural</option>
+            <option value="summaries">summaries</option>
+            <option value="profiles">profiles</option>
+          </select>
+          <input id="memory-namespace-profile" type="text" placeholder="profile_id" oninput="loadMemoryNamespaceItems()" style="min-width:160px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); display:none;">
+          <button class="btn" onclick="loadMemoryNamespaceItems()">Load Namespace</button>
+        </div>
+        <pre id="memory-namespace-output" style="margin-top:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; min-height:120px; max-height:260px; overflow:auto; font-family:var(--mono);"></pre>
+      </div>
+
+      <div class="agent-card">
+        <div class="chat-head">Corpus documents</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0;">
+          <input id="memory-doc-filter-q" type="text" placeholder="Filter by id/title/summary" oninput="memoryDocFilterInputChanged()" style="min-width:220px; flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <input id="memory-doc-filter-tag" type="text" placeholder="Tag" oninput="memoryDocFilterInputChanged()" style="width:120px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <select id="memory-doc-sort-by" onchange="memoryDocFilterChangedInstant()" style="width:140px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+            <option value="updated_at">Sort: updated</option>
+            <option value="title">Sort: title</option>
+            <option value="doc_id">Sort: doc_id</option>
+            <option value="version">Sort: version</option>
+          </select>
+          <select id="memory-doc-sort-dir" onchange="memoryDocFilterChangedInstant()" style="width:95px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+            <option value="desc">DESC</option>
+            <option value="asc">ASC</option>
+          </select>
+          <input id="memory-doc-page-size" type="number" min="5" max="200" value="20" onchange="memoryDocFilterChangedInstant()" style="width:90px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <button class="btn" onclick="applyMemoryDocFilters()">Apply</button>
+        </div>
+        <div style="overflow:auto; border:1px solid var(--border); border-radius:6px;">
+          <table id="memory-doc-table" style="width:100%; border-collapse:collapse; font-size:12px;">
+            <thead>
+              <tr style="background:rgba(255,255,255,.03)">
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Doc ID</th>
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Title</th>
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Version</th>
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Tags</th>
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Summary</th>
+                <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">Updated</th>
+              </tr>
+            </thead>
+            <tbody id="memory-doc-table-body"></tbody>
+          </table>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn" onclick="prevMemoryDocPage()">Prev</button>
+          <button class="btn" onclick="nextMemoryDocPage()">Next</button>
+          <span id="memory-doc-page-info" class="nav-whoami">Page 1</span>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0;">
+          <select id="memory-doc-select" style="min-width:260px; max-width:100%; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);"></select>
+          <button class="btn" onclick="viewSelectedMemoryDocument('summary')">View Summary</button>
+          <button class="btn" onclick="viewSelectedMemoryDocument('text')">View Text</button>
+          <button class="btn" onclick="viewSelectedMemoryDocument('source')">View Source</button>
+          <button class="btn btn-danger" onclick="deleteSelectedMemoryDocument()">Delete</button>
+        </div>
+        <pre id="memory-doc-view-output" style="margin-top:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; min-height:160px; max-height:360px; overflow:auto; font-family:var(--mono);"></pre>
       </div>
     </div>
 

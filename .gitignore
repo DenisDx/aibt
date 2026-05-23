@@ -37,7 +37,7 @@ logs/langgraph-dev.*
 *~
 .DS_Store
 Thumbs.db
-memory/
+/memory/
 AGENTS.md
 SPEC.md
 

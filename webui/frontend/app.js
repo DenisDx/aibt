@@ -8,6 +8,17 @@ let _reconnectTimer = null;
 let _currentUser = null;
 let _langGraphInfo = null;
 let _agentDialogs = {};
+let _memoryDocs = [];
+let _memoryDocTotal = 0;
+let _memoryDocOffset = 0;
+let _memoryDocLimit = 20;
+let _memoryDocQuery = '';
+let _memoryDocTag = '';
+let _memoryCurrentCorpus = '';
+let _memoryDocSortBy = 'updated_at';
+let _memoryDocSortDir = 'desc';
+let _memoryFilterTimer = null;
+let _memoryNamespaceTimer = null;
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -35,6 +46,22 @@ async function apiPost(url, body) {
   return r.json();
 }
 
+async function apiDelete(url) {
+  const r = await fetch(url, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (!r.ok) {
+    let detail = '';
+    try {
+      const payload = await r.json();
+      detail = payload?.detail ? ` (${payload.detail})` : '';
+    } catch (_) {}
+    throw new Error(`DELETE ${url} -> ${r.status}${detail}`);
+  }
+  return r.json();
+}
+
 // ── Screen / page navigation ──────────────────────────────────────────────────
 
 function showScreen(name) {
@@ -57,6 +84,9 @@ function showPage(name) {
   } else if (name === 'agent') {
     _closeWs();
     loadAgentPage();
+  } else if (name === 'memory') {
+    _closeWs();
+    loadMemoryPage();
   } else if (name === 'langgraph') {
     _closeWs();
     loadLangGraphPage();
@@ -111,9 +141,509 @@ async function loadDashboard() {
     if (cardAgents) {
       cardAgents.textContent = agents.ok ? agents.agents.join(', ') : '—';
     }
+
+    const cardMemory = document.getElementById('card-memory');
+    if (cardMemory) {
+      const mem = s.memory || {};
+      if (!mem.enabled) {
+        cardMemory.textContent = 'Disabled';
+        cardMemory.className = 'card-value muted';
+      } else {
+        const corpora = Number(mem.corpora || 0);
+        const docs = Number(mem.documents || 0);
+        cardMemory.textContent = `${corpora} corpora / ${docs} docs`;
+        cardMemory.className = 'card-value ok';
+      }
+    }
   } catch (_) {
     _updateServiceBadge('offline');
   }
+}
+
+// ── Memory page ─────────────────────────────────────────────────────────────
+
+async function loadMemoryPage(force = false) {
+  const meta = document.getElementById('memory-meta');
+  try {
+    await loadMemoryAgents();
+    await loadMemoryCorpora();
+    await loadMemoryNamespaceBrowser();
+    if (force || document.getElementById('page-memory')?.classList.contains('active')) {
+      await loadMemoryDocuments();
+    }
+    const st = await apiGet('/api/memory/status');
+    if (meta) {
+      if (!st.enabled) {
+        meta.textContent = 'Memory status: disabled';
+      } else {
+        meta.textContent = `Memory status: ${st.corpora} corpora / ${st.documents} docs`;
+      }
+    }
+  } catch (e) {
+    if (meta) meta.textContent = 'Memory status error: ' + (e.message || e);
+  }
+}
+
+async function loadMemoryAgents() {
+  const sel = document.getElementById('memory-agent-select');
+  if (!sel) return;
+  const prev = sel.value;
+  try {
+    const list = await apiGet('/api/agents/list');
+    sel.innerHTML = '';
+
+    const anyOpt = document.createElement('option');
+    anyOpt.value = '';
+    anyOpt.textContent = '(no ACL filter)';
+    sel.appendChild(anyOpt);
+
+    (list.agents || []).forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = a;
+      sel.appendChild(opt);
+    });
+
+    if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+      sel.value = prev;
+    }
+  } catch (_) {}
+}
+
+async function loadMemoryCorpora() {
+  const sel = document.getElementById('memory-corpus-select');
+  const agentSel = document.getElementById('memory-agent-select');
+  if (!sel) return;
+  const prev = sel.value;
+  const agent = agentSel?.value || '';
+  const qs = agent ? ('?agent=' + encodeURIComponent(agent)) : '';
+  const data = await apiGet('/api/memory/corpora' + qs);
+  sel.innerHTML = '';
+  (data.items || []).forEach(c => {
+    const id = c.corpus_id || '';
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = `${id} (${Number(c.documents || 0)} docs)`;
+    sel.appendChild(opt);
+  });
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  }
+  const ingestCorpus = document.getElementById('memory-ingest-corpus');
+  if (ingestCorpus && !ingestCorpus.value && sel.value) {
+    ingestCorpus.value = sel.value;
+  }
+}
+
+async function loadMemoryDocuments() {
+  const sel = document.getElementById('memory-corpus-select');
+  const agentSel = document.getElementById('memory-agent-select');
+  if (!sel) return;
+  const corpus = sel.value;
+  if (!corpus) {
+    _memoryDocs = [];
+    _memoryDocTotal = 0;
+    _renderMemoryDocSelect();
+    _renderMemoryDocTable();
+    _renderMemoryDocPageInfo();
+    return;
+  }
+
+  if (_memoryCurrentCorpus !== corpus) {
+    _memoryCurrentCorpus = corpus;
+    _memoryDocOffset = 0;
+  }
+
+  const agent = agentSel?.value || '';
+  const qs =
+    `?corpus_id=${encodeURIComponent(corpus)}&limit=${encodeURIComponent(_memoryDocLimit)}&offset=${encodeURIComponent(_memoryDocOffset)}` +
+    `&q=${encodeURIComponent(_memoryDocQuery)}&tag=${encodeURIComponent(_memoryDocTag)}` +
+    `&sort_by=${encodeURIComponent(_memoryDocSortBy)}&sort_dir=${encodeURIComponent(_memoryDocSortDir)}` +
+    (agent ? `&agent=${encodeURIComponent(agent)}` : '');
+  try {
+    const data = await apiGet('/api/memory/documents' + qs);
+    _memoryDocs = Array.isArray(data.items) ? data.items : [];
+    _memoryDocTotal = Number(data.total || 0);
+
+    if (_memoryDocOffset > 0 && _memoryDocOffset >= _memoryDocTotal) {
+      _memoryDocOffset = Math.max(0, _memoryDocOffset - _memoryDocLimit);
+      await loadMemoryDocuments();
+      return;
+    }
+
+    _renderMemoryDocSelect();
+    _renderMemoryDocTable();
+    _renderMemoryDocPageInfo();
+  } catch (e) {
+    _memoryDocs = [];
+    _memoryDocTotal = 0;
+    _renderMemoryDocSelect();
+    _renderMemoryDocTable('Documents error: ' + (e.message || e));
+    _renderMemoryDocPageInfo();
+  }
+}
+
+async function loadMemoryNamespaceBrowser() {
+  const agentSel = document.getElementById('memory-namespace-agent');
+  const nsSel = document.getElementById('memory-namespace-select');
+  const profileInp = document.getElementById('memory-namespace-profile');
+  if (!agentSel || !nsSel) return;
+
+  const prevAgent = agentSel.value;
+  const prevNs = nsSel.value;
+
+  try {
+    const list = await apiGet('/api/agents/list');
+    agentSel.innerHTML = '';
+    (list.agents || []).forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = a;
+      agentSel.appendChild(opt);
+    });
+    if (prevAgent && Array.from(agentSel.options).some(o => o.value === prevAgent)) {
+      agentSel.value = prevAgent;
+    }
+  } catch (_) {}
+
+  nsSel.innerHTML = '';
+  ['semantic', 'episodic', 'procedural', 'summaries', 'profiles'].forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    nsSel.appendChild(opt);
+  });
+  if (prevNs && Array.from(nsSel.options).some(o => o.value === prevNs)) {
+    nsSel.value = prevNs;
+  }
+  if (profileInp) {
+    profileInp.style.display = nsSel.value === 'profiles' ? '' : 'none';
+  }
+
+  await loadMemoryNamespaceItems();
+}
+
+async function loadMemoryNamespaceItems() {
+  const agentSel = document.getElementById('memory-namespace-agent');
+  const nsSel = document.getElementById('memory-namespace-select');
+  const profileInp = document.getElementById('memory-namespace-profile');
+  const out = document.getElementById('memory-namespace-output');
+  if (!agentSel || !nsSel || !out) return;
+
+  const agent = String(agentSel.value || '').trim();
+  const namespace = String(nsSel.value || '').trim();
+  if (!agent || !namespace) {
+    out.textContent = 'Select agent and namespace.';
+    return;
+  }
+
+  const profileId = namespace === 'profiles' ? String(profileInp?.value || '').trim() : '';
+  if (namespace === 'profiles' && !profileId) {
+    out.textContent = 'Enter profile id for profiles namespace.';
+    return;
+  }
+
+  const qs = `?limit=30${profileId ? `&profile_id=${encodeURIComponent(profileId)}` : ''}`;
+  try {
+    const data = await apiGet(`/api/memory/agent/${encodeURIComponent(agent)}/namespace/${encodeURIComponent(namespace)}${qs}`);
+    out.textContent = JSON.stringify(data.items || [], null, 2);
+  } catch (e) {
+    out.textContent = 'Namespace error: ' + (e.message || e);
+  }
+}
+
+function _renderMemoryDocTable(errorText) {
+  const body = document.getElementById('memory-doc-table-body');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (errorText) {
+    const row = document.createElement('tr');
+    row.innerHTML = `<td colspan="6" style="padding:10px; color:#e05555; border-bottom:1px solid var(--border);">${escapeHtml(errorText)}</td>`;
+    body.appendChild(row);
+    return;
+  }
+
+  if (!_memoryDocs.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td colspan="6" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No documents found.</td>';
+    body.appendChild(row);
+    return;
+  }
+
+  const terms = _memoryHighlightTerms();
+
+  _memoryDocs.forEach((d) => {
+    const row = document.createElement('tr');
+    row.style.cursor = 'pointer';
+    row.onclick = () => {
+      const sel = document.getElementById('memory-doc-select');
+      if (sel) sel.value = String(d.doc_id || '');
+    };
+
+    const tags = Array.isArray(d.tags) ? d.tags.join(', ') : '';
+    const updated = d.updated_at ? String(d.updated_at) : '';
+    const summary = String(d.content_summary || d.summary || '');
+    row.innerHTML =
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${highlightHtml(String(d.doc_id || ''), terms)}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${highlightHtml(String(d.title || ''), terms)}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${d.version != null ? highlightHtml(String(d.version), terms) : ''}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${highlightHtml(tags, terms)}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${highlightHtml(summary, terms)}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(updated)}</td>`;
+    body.appendChild(row);
+  });
+}
+
+function _renderMemoryDocPageInfo() {
+  const info = document.getElementById('memory-doc-page-info');
+  if (!info) return;
+
+  if (_memoryDocTotal <= 0) {
+    info.textContent = 'Page 0 / 0 (0 items)';
+    return;
+  }
+
+  const page = Math.floor(_memoryDocOffset / _memoryDocLimit) + 1;
+  const pages = Math.max(1, Math.ceil(_memoryDocTotal / _memoryDocLimit));
+  info.textContent = `Page ${page} / ${pages} (${_memoryDocTotal} items)`;
+}
+
+function applyMemoryDocFilters() {
+  const qEl = document.getElementById('memory-doc-filter-q');
+  const tagEl = document.getElementById('memory-doc-filter-tag');
+  const pageSizeEl = document.getElementById('memory-doc-page-size');
+  const sortByEl = document.getElementById('memory-doc-sort-by');
+  const sortDirEl = document.getElementById('memory-doc-sort-dir');
+
+  _memoryDocQuery = String(qEl?.value || '').trim();
+  _memoryDocTag = String(tagEl?.value || '').trim();
+  const raw = Number(pageSizeEl?.value || _memoryDocLimit);
+  _memoryDocLimit = Number.isFinite(raw) ? Math.max(5, Math.min(200, Math.trunc(raw))) : 20;
+  _memoryDocSortBy = String(sortByEl?.value || 'updated_at');
+  _memoryDocSortDir = String(sortDirEl?.value || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+  if (pageSizeEl) pageSizeEl.value = String(_memoryDocLimit);
+  if (sortByEl) sortByEl.value = _memoryDocSortBy;
+  if (sortDirEl) sortDirEl.value = _memoryDocSortDir;
+
+  _memoryDocOffset = 0;
+  loadMemoryDocuments();
+}
+
+function memoryDocFilterInputChanged() {
+  if (_memoryFilterTimer) {
+    clearTimeout(_memoryFilterTimer);
+    _memoryFilterTimer = null;
+  }
+  _memoryFilterTimer = setTimeout(() => {
+    _memoryFilterTimer = null;
+    applyMemoryDocFilters();
+  }, 400);
+}
+
+function memoryDocFilterChangedInstant() {
+  if (_memoryFilterTimer) {
+    clearTimeout(_memoryFilterTimer);
+    _memoryFilterTimer = null;
+  }
+  applyMemoryDocFilters();
+}
+
+function prevMemoryDocPage() {
+  if (_memoryDocOffset <= 0) return;
+  _memoryDocOffset = Math.max(0, _memoryDocOffset - _memoryDocLimit);
+  loadMemoryDocuments();
+}
+
+function nextMemoryDocPage() {
+  if ((_memoryDocOffset + _memoryDocLimit) >= _memoryDocTotal) return;
+  _memoryDocOffset += _memoryDocLimit;
+  loadMemoryDocuments();
+}
+
+function _renderMemoryDocSelect() {
+  const sel = document.getElementById('memory-doc-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+
+  if (!_memoryDocs.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no documents)';
+    sel.appendChild(opt);
+    return;
+  }
+
+  _memoryDocs.forEach(d => {
+    const docId = String(d.doc_id || '');
+    const title = String(d.title || docId || 'document');
+    const version = d.version != null ? `v${d.version}` : 'v?';
+    const opt = document.createElement('option');
+    opt.value = docId;
+    opt.textContent = `${title} (${version})`;
+    sel.appendChild(opt);
+  });
+
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  }
+}
+
+async function viewSelectedMemoryDocument(mode) {
+  const sel = document.getElementById('memory-doc-select');
+  const out = document.getElementById('memory-doc-view-output');
+  if (!sel || !out) return;
+  const docId = sel.value;
+  if (!docId) {
+    out.textContent = 'No document selected.';
+    return;
+  }
+  const view = (mode || 'source').toLowerCase();
+  try {
+    const current = (_memoryDocs || []).find(d => String(d.doc_id || '') === String(docId));
+    const version = current && current.version != null ? `&version=${encodeURIComponent(current.version)}` : '';
+    const data = await apiGet(`/api/memory/document/${encodeURIComponent(docId)}?mode=${encodeURIComponent(view)}${version}`);
+    const text = JSON.stringify(data.item || {}, null, 2);
+    out.innerHTML = highlightHtml(text, _memoryHighlightTerms());
+  } catch (e) {
+    out.textContent = 'Document view error: ' + (e.message || e);
+  }
+}
+
+async function deleteSelectedMemoryDocument() {
+  const sel = document.getElementById('memory-doc-select');
+  const out = document.getElementById('memory-doc-view-output');
+  if (!sel) return;
+  const docId = sel.value;
+  if (!docId) {
+    if (out) out.textContent = 'No document selected.';
+    return;
+  }
+  if (!confirm(`Delete document ${docId} from retrieval index?`)) {
+    return;
+  }
+  try {
+    const res = await apiDelete(`/api/memory/document/${encodeURIComponent(docId)}`);
+    if (out) out.textContent = JSON.stringify(res, null, 2);
+    await loadMemoryDocuments();
+    await loadMemoryPage(false);
+  } catch (e) {
+    if (out) out.textContent = 'Delete error: ' + (e.message || e);
+  }
+}
+
+async function runMemoryIngestBatch() {
+  const limitEl = document.getElementById('memory-batch-limit');
+  const msgEl = document.getElementById('memory-batch-msg');
+  const limitRaw = Number(limitEl?.value || 0);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 3;
+
+  if (limitEl) limitEl.value = String(limit);
+  if (msgEl) msgEl.textContent = 'Running batch...';
+
+  try {
+    const res = await apiPost('/api/memory/ingest/run', { limit });
+    const processed = Number(res.processed || 0);
+    const failed = Number(res.failed || 0);
+    if (msgEl) msgEl.textContent = `Done. processed=${processed}, failed=${failed}, limit=${res.limit}`;
+    await loadMemoryPage(true);
+  } catch (e) {
+    if (msgEl) msgEl.textContent = 'Batch error: ' + (e.message || e);
+  }
+}
+
+async function queueMemoryIngestText() {
+  const corpusEl = document.getElementById('memory-ingest-corpus');
+  const titleEl = document.getElementById('memory-ingest-title');
+  const textEl = document.getElementById('memory-ingest-text');
+  const msgEl = document.getElementById('memory-ingest-msg');
+  if (!corpusEl || !textEl || !msgEl) return;
+
+  const corpus = corpusEl.value.trim();
+  const title = titleEl?.value.trim() || null;
+  const text = textEl.value.trim();
+  if (!corpus || !text) {
+    msgEl.textContent = 'corpus_id and text are required';
+    return;
+  }
+
+  msgEl.textContent = 'Queueing...';
+  try {
+    const r = await apiPost('/api/memory/ingest', {
+      corpus_id: corpus,
+      title,
+      source: { type: 'text', text, title },
+      tags: [],
+    });
+    msgEl.textContent = 'Queued: ' + (r.job_id || 'ok');
+    textEl.value = '';
+    await loadMemoryPage(true);
+  } catch (e) {
+    msgEl.textContent = 'Ingest error: ' + (e.message || e);
+  }
+}
+
+async function runMemorySearch() {
+  const qEl = document.getElementById('memory-search-query');
+  const corpusSel = document.getElementById('memory-corpus-select');
+  const agentSel = document.getElementById('memory-agent-select');
+  const out = document.getElementById('memory-search-output');
+  if (!qEl || !out) return;
+
+  const query = qEl.value.trim();
+  if (!query) {
+    out.textContent = 'Enter search query.';
+    return;
+  }
+  const corpora = corpusSel?.value ? [corpusSel.value] : null;
+  const agent = agentSel?.value || null;
+  try {
+    const r = await apiPost('/api/memory/search', {
+      query,
+      corpora,
+      agent,
+      limit: 12,
+    });
+    out.innerHTML = highlightHtml(JSON.stringify(r.items || [], null, 2), [query]);
+  } catch (e) {
+    out.textContent = 'Search error: ' + (e.message || e);
+  }
+}
+
+function _memoryHighlightTerms() {
+  const terms = [];
+  const qEl = document.getElementById('memory-doc-filter-q');
+  const tagEl = document.getElementById('memory-doc-filter-tag');
+  const searchEl = document.getElementById('memory-search-query');
+  [qEl?.value, tagEl?.value, searchEl?.value].forEach(value => {
+    const term = String(value || '').trim();
+    if (term) terms.push(term);
+  });
+  return terms;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function highlightHtml(text, terms) {
+  const source = String(text ?? '');
+  const list = Array.isArray(terms) ? terms.map(t => String(t || '').trim()).filter(Boolean) : [];
+  if (!list.length || !source) return escapeHtml(source);
+
+  const unique = [...new Set(list)].sort((a, b) => b.length - a.length);
+  const pattern = unique.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  if (!pattern) return escapeHtml(source);
+
+  const re = new RegExp(`(${pattern})`, 'gi');
+  return escapeHtml(source).replace(re, '<mark style="background: rgba(91,138,247,.35); color: inherit; padding: 0 2px; border-radius: 3px;">$1</mark>');
 }
 
 function _dialogFor(agent) {
@@ -559,6 +1089,7 @@ function _cleanup() {
   _closeWs();
   if (_statusInterval) { clearInterval(_statusInterval); _statusInterval = null; }
   if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+  if (_memoryFilterTimer) { clearTimeout(_memoryFilterTimer); _memoryFilterTimer = null; }
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
@@ -579,6 +1110,7 @@ document.addEventListener('keydown', e => {
     showScreen('app');
     loadDashboard();
     loadAgentPage();
+    loadMemoryPage();
     setupLogPanel();
     _startStatusPoll();
   } catch (_) {

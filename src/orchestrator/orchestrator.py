@@ -13,6 +13,7 @@ from agents.echo.agent import EchoAgent
 from agents.math.agent import MathAgent
 from agents.graph_echo.agent import GraphEchoAgent
 from core.logging_utils import log
+from memory.langgraph_runtime import build_langgraph_runtime
 
 
 class OrchestratorState(TypedDict, total=False):
@@ -37,6 +38,8 @@ class AgentOrchestrator:
         self.config = config or {}
         self.agents = {}
         self.tasks: Dict[str, dict] = {}  # id -> {status, agent, query, result}
+        root_dir = str(self.config.get("root") or "")
+        self.checkpointer, self.store = build_langgraph_runtime(root_dir, self.config, "orchestrator")
         self._init_agents()
         self.graph = self._build_graph()
 
@@ -91,7 +94,7 @@ class AgentOrchestrator:
             self._after_fallback,
             {"done": END, "error": END},
         )
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer, store=self.store)
 
     def _task_cfg(self) -> dict[str, Any]:
         """Return orchestrator options from config."""
@@ -106,6 +109,22 @@ class AgentOrchestrator:
         if task_id in self.tasks:
             self.tasks[task_id].update(kwargs)
             self.tasks[task_id]["updated_at"] = self._utcnow_iso()
+
+    @staticmethod
+    def _error_text(exc: Exception | str | None) -> str:
+        """Render stable non-empty error text.
+
+        Input: exception or plain error value.
+        Output: non-empty error string.
+        """
+
+        if exc is None:
+            return "unknown error"
+        if isinstance(exc, Exception):
+            text = str(exc).strip()
+            return text or exc.__class__.__name__
+        text = str(exc).strip()
+        return text or "unknown error"
 
     async def _node_route(self, state: OrchestratorState) -> OrchestratorState:
         """Validate requested agent and mark task as running."""
@@ -128,7 +147,7 @@ class AgentOrchestrator:
         task_id = state["task_id"]
         agent_name = state["agent"]
         query = state["query"]
-        context = state.get("context", {})
+        context = {**(state.get("context", {}) or {}), "task_id": task_id}
 
         try:
             result = await self.agents[agent_name].handle(query, context)
@@ -140,21 +159,22 @@ class AgentOrchestrator:
             retries = int(state.get("retries", 0))
             max_retries = int(state.get("max_retries", 1))
             fallback_agent = str(state.get("fallback_agent", "")).strip()
+            err_text = self._error_text(e)
             log(
                 "core",
                 "error",
                 f"Task {task_id} failed in agent={agent_name} on retry={retries}: {e}\n{traceback.format_exc()}",
                 tag="orchestrator",
             )
-            self._set_task(task_id, status="retrying", result={"error": str(e), "retries": retries})
+            self._set_task(task_id, status="retrying", result={"error": err_text, "retries": retries})
 
             if retries < max_retries:
-                return {"status": "retry", "error": str(e)}
+                return {"status": "retry", "error": err_text}
             if fallback_agent and fallback_agent in self.agents and fallback_agent != agent_name:
-                return {"status": "fallback", "error": str(e)}
+                return {"status": "fallback", "error": err_text}
 
-            self._set_task(task_id, status="error", result={"error": str(e)})
-            return {"status": "error", "error": str(e)}
+            self._set_task(task_id, status="error", result={"error": err_text})
+            return {"status": "error", "error": err_text}
 
     def _after_execute(self, state: OrchestratorState) -> str:
         """Choose edge after agent execution."""
@@ -183,21 +203,22 @@ class AgentOrchestrator:
             return {"status": "error", "error": err}
 
         query = state["query"]
-        context = state.get("context", {})
+        context = {**(state.get("context", {}) or {}), "task_id": task_id}
         self._set_task(task_id, status="running", result={"fallback": fallback_agent})
         try:
             result = await self.agents[fallback_agent].handle(query, context)
             self._set_task(task_id, status="done", result={"via_fallback": fallback_agent, **result})
             return {"status": "done", "result": {"via_fallback": fallback_agent, **result}}
         except Exception as e:
+            err_text = self._error_text(e)
             log(
                 "core",
                 "error",
                 f"Task {task_id} fallback agent={fallback_agent} failed: {e}\n{traceback.format_exc()}",
                 tag="orchestrator",
             )
-            self._set_task(task_id, status="error", result={"error": str(e)})
-            return {"status": "error", "error": str(e)}
+            self._set_task(task_id, status="error", result={"error": err_text})
+            return {"status": "error", "error": err_text}
 
     def _after_fallback(self, state: OrchestratorState) -> str:
         """Choose final edge after fallback execution."""
@@ -287,7 +308,7 @@ class AgentOrchestrator:
                 f"Starting task {task_id} for agent={agent_name}",
                 tag="orchestrator",
             )
-            final_state = await self.graph.ainvoke(initial)
+            final_state = await self.graph.ainvoke(initial, config={"configurable": {"thread_id": task_id}})
             if final_state.get("status") == "done":
                 self._set_task(
                     task_id,
@@ -296,17 +317,19 @@ class AgentOrchestrator:
                     retries=int(final_state.get("retries", self.tasks[task_id].get("retries", 0))),
                 )
             elif final_state.get("status") == "error":
+                err_text = self._error_text(final_state.get("error", "unknown error"))
                 self._set_task(
                     task_id,
                     status="error",
-                    result={"error": str(final_state.get("error", "unknown error"))},
+                    result={"error": err_text},
                     retries=int(final_state.get("retries", self.tasks[task_id].get("retries", 0))),
                 )
         except Exception as e:
+            err_text = self._error_text(e)
             log(
                 "core",
                 "error",
                 f"Task runner crashed for task {task_id} agent={agent_name}: {e}\n{traceback.format_exc()}",
                 tag="orchestrator",
             )
-            self._set_task(task_id, status="error", result={"error": str(e)})
+            self._set_task(task_id, status="error", result={"error": err_text})

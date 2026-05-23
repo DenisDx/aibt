@@ -13,7 +13,11 @@ class EchoAgent(AgentBase):
     def build_chain(self):
         prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", "You are EchoAgent. Return the user text unchanged. No extra words."),
+                (
+                    "system",
+                    "You are EchoAgent. Return the user text unchanged. No extra words. "
+                    "Use memory context only for understanding; do not print it.\n{memory_context}",
+                ),
                 ("human", "{query}"),
             ]
         )
