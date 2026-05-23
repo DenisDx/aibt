@@ -33,6 +33,9 @@
     // Maximum size in bytes for individual log files. 0 = unlimited.
     "max_log_size": ${MAX_LOG_SIZE:-10485760},
 
+    // Persist LLM prompts/responses to logs/<agent>_llm.jsonl when enabled per agent.
+    "log_llm": false,
+
     // Per-subsystem level overrides. Unspecified subsystems use "level" above.
     "levels": {
       "core": "info",
@@ -54,7 +57,12 @@
       "echo": { "enabled": true },
       "math": { "enabled": true },
       "graph_echo": { "enabled": true },
-      "chat_group_helper": { "enabled": true },
+      "chat_group_helper": {
+        "enabled": true,
+        "logging": {
+          "log_llm": true
+        }
+      },
       // Example per-agent corpus allowlist.
       // "researcher": {
       //   "enabled": true,
@@ -168,6 +176,7 @@
         "enabled": false,  // Set to true and provide TELEGRAM_BOT_TOKEN to enable
         "token": "${TELEGRAM_BOT_TOKEN}",  // Telegram Bot token from @BotFather
         "default_agent": "chat_group_helper",  // Agent to use for Telegram messages
+        "show_typing": false,  // Show typing indicator while waiting for agent response
         "polling": true,  // Use polling (true) or webhook (false)
         "polling_timeout": 30,  // Polling timeout in seconds
         "listen_private": true,  // Listen to private chats

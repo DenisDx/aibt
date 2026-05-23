@@ -11,7 +11,7 @@ class MathAgent(AgentBase):
     """LLM-backed math helper agent."""
 
     def build_chain(self):
-        prompt = ChatPromptTemplate.from_messages(
+        self.prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
@@ -24,4 +24,4 @@ class MathAgent(AgentBase):
             ]
         )
         llm = build_llm(self.app_config)
-        return prompt | llm
+        return self.prompt | llm

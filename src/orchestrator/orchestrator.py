@@ -303,6 +303,32 @@ class AgentOrchestrator:
             self.tasks[task_id].update(kwargs)
             self.tasks[task_id]["updated_at"] = self._utcnow_iso()
 
+    @classmethod
+    def _sanitize_state_value(cls, value: Any, depth: int = 0) -> Any:
+        """Sanitize arbitrary values for durable graph state serialization."""
+
+        if depth > 8:
+            return str(value)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in value.items():
+                out[str(key)] = cls._sanitize_state_value(item, depth + 1)
+            return out
+        if isinstance(value, (list, tuple, set)):
+            return [cls._sanitize_state_value(item, depth + 1) for item in value]
+        return str(value)
+
+    @classmethod
+    def _sanitize_context(cls, context: dict[str, Any] | None) -> dict[str, Any]:
+        """Return serialization-safe context payload for task state."""
+
+        raw = context or {}
+        if not isinstance(raw, dict):
+            return {"value": cls._sanitize_state_value(raw)}
+        return cls._sanitize_state_value(raw)
+
     @staticmethod
     def _error_text(exc: Exception | str | None) -> str:
         """Render stable non-empty error text.
@@ -472,7 +498,7 @@ class AgentOrchestrator:
 
     async def submit(self, agent_name: str, query: str, context=None) -> str:
         """Create a new task and schedule LangGraph execution."""
-        ctx = context or {}
+        ctx = self._sanitize_context(context)
         envid = str(ctx.get("envid", "")).strip() or None
         agents = self._agents_for_envid(envid)
         if agent_name not in agents:
@@ -495,11 +521,12 @@ class AgentOrchestrator:
     async def _run_task(self, task_id, agent_name, query, context):
         """Execute full LangGraph flow and write terminal task state."""
         orch_cfg = self._task_cfg()
+        safe_context = self._sanitize_context(context)
         initial: OrchestratorState = {
             "task_id": task_id,
             "agent": agent_name,
             "query": query,
-            "context": context or {},
+            "context": safe_context,
             "status": "pending",
             "retries": 0,
             "max_retries": int(orch_cfg.get("max_retries", 1)),

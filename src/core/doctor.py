@@ -205,8 +205,9 @@ def chk_logs_dir(fix: bool) -> Check:
 
 def _instance_name() -> str:
     try:
-        from core.config import load_env_file
-        return load_env_file(_ROOT_DIR).get("AIBT_INSTANCE", "aibt")
+        from core.config import load_config
+        cfg = load_config(_ROOT_DIR)
+        return str(cfg.get("instance") or "aibt")
     except Exception:
         return "aibt"
 

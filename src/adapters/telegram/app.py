@@ -77,6 +77,7 @@ class TelegramAdapter(Adapter):
         self.polling_timeout = int(cfg.get("polling_timeout", 30))
         self.listen_private = bool(cfg.get("listen_private", True))
         self.listen_groups = bool(cfg.get("listen_groups", True))
+        self.show_typing = bool(cfg.get("show_typing", False))
         self.dialog_log_type = str(cfg.get("dialog_log_type", "telegram_dialog"))
 
     def _message_mentions_bot(self, update: "Update") -> bool:
@@ -345,7 +346,8 @@ class TelegramAdapter(Adapter):
             return {"error": f"task submission failed: {e}"}
 
         # Show typing indicator while waiting for response
-        await self.send_typing_action(chat_id)
+        if self.show_typing:
+            await self.send_typing_action(chat_id)
         
         # Wait for completion (polling, since orchestrator is in-memory)
         for attempt in range(120):  # up to 60s
@@ -357,7 +359,8 @@ class TelegramAdapter(Adapter):
                 return result
             # Re-send typing indicator every 5 seconds
             if attempt > 0 and attempt % 10 == 0:
-                await self.send_typing_action(chat_id)
+                if self.show_typing:
+                    await self.send_typing_action(chat_id)
             await asyncio.sleep(0.5)
 
         log("adapters.telegram", "error", f"task timeout after 60s: {task_id}")
@@ -535,7 +538,6 @@ class TelegramAdapter(Adapter):
                 "",
                 text,
                 context={
-                    "update": update,
                     "adapter": "telegram",
                     "chat_id": chat_id,
                     "chat_type": getattr(update.effective_chat, "type", ""),

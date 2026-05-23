@@ -25,13 +25,10 @@ class ChatGroupHelperAgent(AgentBase):
         """Build LLM chain with optional external instruction files."""
 
         instruction_block = self._load_instruction_block()
-        prompt = ChatPromptTemplate.from_messages(
+        self.prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
-                    "You are chat_group_helper, an assistant for Telegram group chats. "
-                    "Keep responses short, practical, and relevant to the current message. "
-                    "Do not output memory context verbatim.\n"
                     f"{instruction_block}\n"
                     "Memory context:\n{memory_context}",
                 ),
@@ -39,7 +36,7 @@ class ChatGroupHelperAgent(AgentBase):
             ]
         )
         llm = build_llm(self.app_config)
-        return prompt | llm
+        return self.prompt | llm
 
     async def handle(self, query: str, context=None) -> dict[str, Any]:
         """Evaluate reply policy, optionally answer, and persist trace/profile updates."""

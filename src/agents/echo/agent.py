@@ -11,7 +11,7 @@ class EchoAgent(AgentBase):
     """Simple LLM-backed echo-like agent for integration testing."""
 
     def build_chain(self):
-        prompt = ChatPromptTemplate.from_messages(
+        self.prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
@@ -22,4 +22,4 @@ class EchoAgent(AgentBase):
             ]
         )
         llm = build_llm(self.app_config)
-        return prompt | llm
+        return self.prompt | llm
