@@ -686,6 +686,7 @@ class WebUIServer:
             namespace: str,
             limit: int = 100,
             profile_id: str = "",
+            envid: str = "",
             session: dict = Depends(require),
         ):
             clean_agent = agent_id.strip()
@@ -700,6 +701,7 @@ class WebUIServer:
                     namespace=clean_ns,
                     limit=max(1, min(200, int(limit))),
                     profile_id=profile_id.strip() or None,
+                    envid=envid.strip() or None,
                 )
                 return {"ok": True, "items": items}
             except Exception as e:

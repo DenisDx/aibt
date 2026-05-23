@@ -107,7 +107,14 @@ class MemoryTools:
         svc = get_memory_service(self.root_dir, self.config)
         return svc.delete_document(doc_id)
 
-    def recall_memory(self, agent_id: str, query: str, scope: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+    def recall_memory(
+        self,
+        agent_id: str,
+        query: str,
+        scope: str | None = None,
+        limit: int = 8,
+        envid: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Recall memory snippets.
 
         Input: agent id, query, optional scope.
@@ -115,9 +122,16 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.recall_memory(agent_id=agent_id, query=query, scope=scope, limit=limit)
+        return svc.recall_memory(agent_id=agent_id, query=query, scope=scope, limit=limit, envid=envid)
 
-    def remember_fact(self, agent_id: str, text: str, scope: str | None = None, importance: float = 0.5) -> dict[str, Any]:
+    def remember_fact(
+        self,
+        agent_id: str,
+        text: str,
+        scope: str | None = None,
+        importance: float = 0.5,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Store semantic fact.
 
         Input: agent id and fact text.
@@ -125,9 +139,16 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.remember_fact(agent_id=agent_id, text=text, scope=scope, importance=importance)
+        return svc.remember_fact(agent_id=agent_id, text=text, scope=scope, importance=importance, envid=envid)
 
-    def record_episode(self, agent_id: str, text: str, task_id: str | None = None, outcome: str | None = None) -> dict[str, Any]:
+    def record_episode(
+        self,
+        agent_id: str,
+        text: str,
+        task_id: str | None = None,
+        outcome: str | None = None,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Store episodic event.
 
         Input: agent id and event text.
@@ -135,9 +156,9 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.record_episode(agent_id=agent_id, text=text, task_id=task_id, outcome=outcome)
+        return svc.record_episode(agent_id=agent_id, text=text, task_id=task_id, outcome=outcome, envid=envid)
 
-    def get_procedural_memory(self, agent_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def get_procedural_memory(self, agent_id: str, limit: int = 20, envid: str | None = None) -> list[dict[str, Any]]:
         """Read procedural memory.
 
         Input: agent id and limit.
@@ -145,9 +166,9 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.get_procedural_memory(agent_id=agent_id, limit=limit)
+        return svc.get_procedural_memory(agent_id=agent_id, limit=limit, envid=envid)
 
-    def get_session_summary(self, agent_id: str, thread_id: str) -> dict[str, Any]:
+    def get_session_summary(self, agent_id: str, thread_id: str, envid: str | None = None) -> dict[str, Any]:
         """Read one session summary.
 
         Input: agent id and thread id.
@@ -155,9 +176,9 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.get_session_summary(agent_id=agent_id, thread_id=thread_id)
+        return svc.get_session_summary(agent_id=agent_id, thread_id=thread_id, envid=envid)
 
-    def get_agent_profile(self, agent_id: str) -> dict[str, Any]:
+    def get_agent_profile(self, agent_id: str, envid: str | None = None) -> dict[str, Any]:
         """Read aggregated agent memory profile.
 
         Input: agent id.
@@ -165,9 +186,15 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.get_agent_profile(agent_id=agent_id)
+        return svc.get_agent_profile(agent_id=agent_id, envid=envid)
 
-    def update_procedural_memory(self, agent_id: str, text: str, reason: str | None = None) -> dict[str, Any]:
+    def update_procedural_memory(
+        self,
+        agent_id: str,
+        text: str,
+        reason: str | None = None,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Store procedural rule update.
 
         Input: agent id and text.
@@ -175,7 +202,7 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.update_procedural_memory(agent_id=agent_id, text=text, reason=reason)
+        return svc.update_procedural_memory(agent_id=agent_id, text=text, reason=reason, envid=envid)
 
     def remember_profile_fact(
         self,
@@ -184,6 +211,7 @@ class MemoryTools:
         text: str,
         scope: str | None = None,
         importance: float = 0.5,
+        envid: str | None = None,
     ) -> dict[str, Any]:
         """Store user/channel profile fact.
 
@@ -198,9 +226,10 @@ class MemoryTools:
             text=text,
             scope=scope,
             importance=importance,
+            envid=envid,
         )
 
-    def get_profile_memory(self, agent_id: str, profile_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def get_profile_memory(self, agent_id: str, profile_id: str, limit: int = 20, envid: str | None = None) -> list[dict[str, Any]]:
         """Read user/channel profile facts.
 
         Input: agent id, profile id, and limit.
@@ -208,4 +237,4 @@ class MemoryTools:
         """
 
         svc = get_memory_service(self.root_dir, self.config)
-        return svc.get_profile_memory(agent_id=agent_id, profile_id=profile_id, limit=limit)
+        return svc.get_profile_memory(agent_id=agent_id, profile_id=profile_id, limit=limit, envid=envid)

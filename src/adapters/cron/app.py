@@ -16,7 +16,7 @@ class CronAdapter(Adapter):
             orchestrator: AgentOrchestrator instance
             config: Configuration dict with cron schedules and tasks
         """
-        super().__init__(config)
+        super().__init__(config, adapter_id="cron")
         self.orchestrator = orchestrator
         self.schedules = self.config.get("cron", {}).get("schedules", [])
         self.tasks = self.config.get("cron", {}).get("tasks", [])

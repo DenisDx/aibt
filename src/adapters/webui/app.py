@@ -8,7 +8,7 @@ class WebUIAdapter(Adapter):
     """Adapter for handling WebUI agent dialogue requests."""
 
     def __init__(self, orchestrator, config: dict[str, Any] = None):
-        super().__init__(config)
+        super().__init__(config, adapter_id="webui")
         self.orchestrator = orchestrator
 
     async def handle(self, user_id: str, agent_id: str, message: str, context: dict = None) -> dict:

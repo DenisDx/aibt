@@ -10,6 +10,7 @@ import sys
 import os
 import subprocess
 import argparse
+from collections import Counter
 
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SRC_DIR = os.path.join(_ROOT_DIR, "src")
@@ -56,6 +57,131 @@ def chk_config(fix: bool) -> Check:
         return Check("config.json5", False, "file not found — run install.sh")
     except Exception as e:
         return Check("config.json5", False, f"parse error: {e}")
+
+
+def chk_envids(fix: bool) -> Check:
+    """Validate envid definitions and references.
+
+    Input: fix mode flag (unused).
+    Output: health check status for envid configuration.
+    """
+
+    del fix
+    try:
+        from core.config import load_config
+
+        cfg = load_config(_ROOT_DIR)
+    except Exception as e:
+        return Check("envids", False, f"cannot load config: {e}")
+
+    envids_cfg = cfg.get("envids", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(envids_cfg, dict) or not bool(envids_cfg.get("enabled", False)):
+        return Check("envids", True, "disabled")
+
+    items = envids_cfg.get("items", {}) if isinstance(envids_cfg, dict) else {}
+    if not isinstance(items, dict) or not items:
+        return Check("envids", False, "enabled but envids.items is empty or invalid")
+
+    errors: list[str] = []
+
+    startup_order = envids_cfg.get("startup_order", [])
+    if isinstance(startup_order, list):
+        order = [str(x).strip() for x in startup_order if str(x).strip()]
+        missing = [x for x in order if x not in items]
+        if missing:
+            errors.append(f"startup_order references unknown envid: {', '.join(missing[:3])}")
+        if len(order) != len(set(order)):
+            errors.append("startup_order contains duplicates")
+
+    adapter_order = envids_cfg.get("adapter_startup_order", {})
+    if isinstance(adapter_order, dict):
+        for adapter_name, order_raw in adapter_order.items():
+            if not isinstance(order_raw, list):
+                errors.append(f"adapter_startup_order.{adapter_name} must be list")
+                continue
+            order = [str(x).strip() for x in order_raw if str(x).strip()]
+            missing = [x for x in order if x not in items]
+            if missing:
+                errors.append(f"adapter_startup_order.{adapter_name} unknown envid: {', '.join(missing[:3])}")
+
+    declared_agent_ids = set()
+    agents_items = cfg.get("agents", {}).get("items", {}) if isinstance(cfg.get("agents", {}), dict) else {}
+    if isinstance(agents_items, dict):
+        declared_agent_ids.update(str(x).strip() for x in agents_items.keys() if str(x).strip())
+
+    agents_dir = os.path.join(_ROOT_DIR, "src", "agents")
+    if os.path.isdir(agents_dir):
+        for entry in os.listdir(agents_dir):
+            if os.path.isdir(os.path.join(agents_dir, entry)):
+                declared_agent_ids.add(entry)
+
+    telegram_chat_ids: list[str] = []
+    for envid, entry in items.items():
+        env_key = str(envid).strip()
+        if not env_key:
+            errors.append("found empty envid key")
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"envid '{env_key}' must be object")
+            continue
+
+        matching = entry.get("matching", {})
+        if not isinstance(matching, dict):
+            errors.append(f"envid '{env_key}' matching must be object")
+            matching = {}
+        adapters = matching.get("adapters", {}) if isinstance(matching, dict) else {}
+        if adapters and not isinstance(adapters, dict):
+            errors.append(f"envid '{env_key}' matching.adapters must be object")
+            adapters = {}
+
+        tg = adapters.get("telegram", {}) if isinstance(adapters, dict) else {}
+        if isinstance(tg, dict):
+            chat_ids = tg.get("chat_ids", [])
+            if isinstance(chat_ids, list):
+                telegram_chat_ids.extend(str(x).strip() for x in chat_ids if str(x).strip())
+
+        overlay = entry.get("config", {}) if isinstance(entry, dict) else {}
+        if not isinstance(overlay, dict):
+            errors.append(f"envid '{env_key}' config must be object")
+            continue
+
+        env_agents = overlay.get("agents", {}).get("items", {}) if isinstance(overlay.get("agents", {}), dict) else {}
+        if isinstance(env_agents, dict):
+            for agent_id, agent_cfg in env_agents.items():
+                clean_agent = str(agent_id).strip()
+                if not clean_agent:
+                    continue
+                if clean_agent not in declared_agent_ids:
+                    errors.append(f"envid '{env_key}' references unknown agent '{clean_agent}'")
+                if not isinstance(agent_cfg, dict):
+                    continue
+
+                agentmd_file = str(agent_cfg.get("agentmd_file", "")).strip()
+                if agentmd_file and not os.path.exists(agentmd_file):
+                    errors.append(f"envid '{env_key}' missing agentmd_file: {agentmd_file}")
+
+                instruction_files = agent_cfg.get("instruction_files")
+                if isinstance(instruction_files, list):
+                    for file_path in instruction_files:
+                        path = str(file_path).strip()
+                        if path and not os.path.exists(path):
+                            errors.append(f"envid '{env_key}' missing instruction file: {path}")
+
+        env_adapters = overlay.get("adapters", {}).get("items", {}) if isinstance(overlay.get("adapters", {}), dict) else {}
+        tg_cfg = env_adapters.get("telegram", {}) if isinstance(env_adapters, dict) else {}
+        if isinstance(tg_cfg, dict):
+            default_agent = str(tg_cfg.get("default_agent", "")).strip()
+            if default_agent and default_agent not in declared_agent_ids:
+                errors.append(f"envid '{env_key}' telegram.default_agent unknown: {default_agent}")
+
+    id_counts = Counter(x for x in telegram_chat_ids if x)
+    duplicates = [chat_id for chat_id, cnt in id_counts.items() if cnt > 1]
+    if duplicates:
+        errors.append(f"ambiguous telegram chat_ids across envids: {', '.join(duplicates[:3])}")
+
+    if errors:
+        return Check("envids", False, "; ".join(errors[:5]))
+    return Check("envids", True, f"valid ({len(items)} environments)")
 
 
 def chk_venv(fix: bool) -> Check:
@@ -167,6 +293,7 @@ def main() -> int:
     checks = [
         chk_env(args.fix),
         chk_config(args.fix),
+        chk_envids(args.fix),
         chk_venv(args.fix),
         chk_logs_dir(args.fix),
         chk_crontab(args.fix),

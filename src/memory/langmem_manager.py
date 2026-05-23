@@ -35,14 +35,14 @@ class LangMemManager:
         if not self.memory_cfg.get("enabled", True):
             return {"enabled": False, "agents": [], "summaries": 0, "semantic_promotions": 0, "archives": 0}
 
-        agent_ids = self._agent_ids()
+        scopes = self._agent_scopes()
         summary_count = 0
         semantic_count = 0
         archive_count = 0
         agent_reports: list[dict[str, Any]] = []
 
-        for agent_id in agent_ids:
-            report = self.run_for_agent(agent_id)
+        for envid, agent_id in scopes:
+            report = self.run_for_agent(agent_id, envid=envid)
             agent_reports.append(report)
             summary_count += int(report.get("summaries", 0))
             semantic_count += int(report.get("semantic_promotions", 0))
@@ -56,7 +56,7 @@ class LangMemManager:
             "archives": archive_count,
         }
 
-    def run_for_agent(self, agent_id: str) -> dict[str, Any]:
+    def run_for_agent(self, agent_id: str, envid: str | None = None) -> dict[str, Any]:
         """Run maintenance for one agent namespace.
 
         Input: agent id.
@@ -64,14 +64,16 @@ class LangMemManager:
         """
 
         clean_agent = str(agent_id or "").strip()
+        clean_env = str(envid or "global").strip() or "global"
         if not clean_agent:
-            return {"agent_id": "", "summaries": 0, "semantic_promotions": 0, "archives": 0}
+            return {"agent_id": "", "envid": clean_env, "summaries": 0, "semantic_promotions": 0, "archives": 0}
 
-        summary_count = self._summarize_threads(clean_agent)
-        semantic_count = self._promote_semantic_facts(clean_agent)
-        archive_count = self._archive_old_episodes(clean_agent)
+        summary_count = self._summarize_threads(clean_agent, envid=clean_env)
+        semantic_count = self._promote_semantic_facts(clean_agent, envid=clean_env)
+        archive_count = self._archive_old_episodes(clean_agent, envid=clean_env)
         return {
             "agent_id": clean_agent,
+            "envid": clean_env,
             "summaries": summary_count,
             "semantic_promotions": semantic_count,
             "archives": archive_count,
@@ -108,18 +110,18 @@ class LangMemManager:
             )
         return self._dedupe_records(facts)
 
-    def _summarize_threads(self, agent_id: str) -> int:
+    def _summarize_threads(self, agent_id: str, envid: str | None = None) -> int:
         """Write compact session summaries for stale episodic threads.
 
         Input: agent id.
         Output: number of summary records written.
         """
 
-        episodes = self._read_namespace(agent_id, "episodic", limit=500)
+        episodes = self._read_namespace(agent_id, "episodic", limit=500, envid=envid)
         if not episodes:
             return 0
 
-        existing = self._read_namespace(agent_id, "summaries", limit=500)
+        existing = self._read_namespace(agent_id, "summaries", limit=500, envid=envid)
         existing_by_thread = {str(item.get("thread_id") or item.get("task_id") or ""): item for item in existing}
 
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -153,24 +155,24 @@ class LangMemManager:
                 "latest_episode_ts": latest_episode_ts,
                 "source": "langmem",
             }
-            self._append_namespace(agent_id, "summaries", payload)
+            self._append_namespace(agent_id, "summaries", payload, envid=envid)
             written += 1
 
         return written
 
-    def _promote_semantic_facts(self, agent_id: str) -> int:
+    def _promote_semantic_facts(self, agent_id: str, envid: str | None = None) -> int:
         """Promote strong episodic signals into semantic memory.
 
         Input: agent id.
         Output: number of semantic records written.
         """
 
-        events = self._read_namespace(agent_id, "episodic", limit=500)
+        events = self._read_namespace(agent_id, "episodic", limit=500, envid=envid)
         if not events:
             return 0
 
         candidates = self.extract_semantic_facts(events)
-        existing = self._read_namespace(agent_id, "semantic", limit=1000)
+        existing = self._read_namespace(agent_id, "semantic", limit=1000, envid=envid)
         existing_keys = {self._normalize_text(str(item.get("text") or "")) for item in existing}
 
         written = 0
@@ -186,7 +188,7 @@ class LangMemManager:
                 "importance": fact.get("importance", 0.0),
                 "source": fact.get("source", {}),
                 "promoted_by": "langmem",
-            })
+            }, envid=envid)
             existing_keys.add(normalized)
             written += 1
             if written >= max_per_tick:
@@ -194,14 +196,14 @@ class LangMemManager:
 
         return written
 
-    def _archive_old_episodes(self, agent_id: str) -> int:
+    def _archive_old_episodes(self, agent_id: str, envid: str | None = None) -> int:
         """Summarize old episodic items into archival summaries.
 
         Input: agent id.
         Output: number of archived summary records written.
         """
 
-        episodes = self._read_namespace(agent_id, "episodic", limit=1000)
+        episodes = self._read_namespace(agent_id, "episodic", limit=1000, envid=envid)
         if not episodes:
             return 0
 
@@ -226,21 +228,21 @@ class LangMemManager:
                 "task_id": item.get("task_id"),
                 "text": f"Archived episode: {text[:280]}",
                 "source": "langmem-archive",
-            })
+            }, envid=envid)
             archived += 1
             if archived >= int(self.langmem_cfg.get("max_archives_per_tick", 8)):
                 break
 
         return archived
 
-    def _read_namespace(self, agent_id: str, namespace: str, limit: int) -> list[dict[str, Any]]:
+    def _read_namespace(self, agent_id: str, namespace: str, limit: int, envid: str | None = None) -> list[dict[str, Any]]:
         """Read latest namespace records.
 
         Input: agent id, namespace, and record cap.
         Output: list of records.
         """
 
-        return self.service.read_namespace_items(self.service._namespace_tuple(agent_id, namespace), limit=limit)
+        return self.service.read_namespace_items(self.service._namespace_tuple(agent_id, namespace, envid=envid), limit=limit)
 
     @staticmethod
     def _coerce_record(raw: str) -> dict[str, Any]:
@@ -255,23 +257,23 @@ class LangMemManager:
         item = json.loads(raw)
         return item if isinstance(item, dict) else {"value": item}
 
-    def _append_namespace(self, agent_id: str, namespace: str, payload: dict[str, Any]) -> str:
+    def _append_namespace(self, agent_id: str, namespace: str, payload: dict[str, Any], envid: str | None = None) -> str:
         """Append one namespace record.
 
         Input: agent id, namespace, and payload.
         Output: JSONL file path.
         """
 
-        return self.service.put_namespace_item(self.service._namespace_tuple(agent_id, namespace), payload)
+        return self.service.put_namespace_item(self.service._namespace_tuple(agent_id, namespace, envid=envid), payload)
 
-    def _agent_ids(self) -> list[str]:
-        """List known agent namespaces.
+    def _agent_scopes(self) -> list[tuple[str, str]]:
+        """List known (envid, agent) namespaces.
 
         Input: none.
-        Output: agent id list.
+        Output: list of (envid, agent_id).
         """
 
-        return self.service.list_agent_ids()
+        return self.service.list_agent_scopes()
 
     @staticmethod
     def _parse_ts(value: Any) -> datetime | None:

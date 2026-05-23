@@ -9,9 +9,11 @@ from typing import Dict, Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from agents.base import AgentBase
 from agents.echo.agent import EchoAgent
 from agents.math.agent import MathAgent
 from agents.graph_echo.agent import GraphEchoAgent
+from core.envid_runtime import load_environment_registry
 from core.logging_utils import log
 from memory.langgraph_runtime import build_langgraph_runtime
 
@@ -36,7 +38,8 @@ class AgentOrchestrator:
 
     def __init__(self, config=None):
         self.config = config or {}
-        self.agents = {}
+        self.agents: Dict[str, Any] = {}
+        self._agents_by_envid: Dict[str | None, Dict[str, Any]] = {}
         self.tasks: Dict[str, dict] = {}  # id -> {status, agent, query, result}
         root_dir = str(self.config.get("root") or "")
         self.checkpointer, self.store = build_langgraph_runtime(root_dir, self.config, "orchestrator")
@@ -44,30 +47,48 @@ class AgentOrchestrator:
         self.graph = self._build_graph()
 
     def _init_agents(self):
-        """Initialize built-in agents and apply optional config overrides."""
-        items = self.config.get("agents", {}).get("items", {})
+        """Initialize default agent registry and prewarm configured envid registries."""
 
-        echo_cfg = items.get("echo", {}) if isinstance(items, dict) else {}
-        math_cfg = items.get("math", {}) if isinstance(items, dict) else {}
-        graph_echo_cfg = items.get("graph_echo", {}) if isinstance(items, dict) else {}
+        self.agents = self._build_agents_for_envid(None)
+        self._agents_by_envid[None] = self.agents
 
-        if not echo_cfg.get("enabled", True):
-            pass
-        else:
-            self.agents["echo"] = EchoAgent(self.config, {"name": "echo", **echo_cfg})
+        for envid in load_environment_registry(self.config).keys():
+            self._agents_by_envid[envid] = self._build_agents_for_envid(envid)
 
-        if not math_cfg.get("enabled", True):
-            pass
-        else:
-            self.agents["math"] = MathAgent(self.config, {"name": "math", **math_cfg})
+    def _build_agents_for_envid(self, envid: str | None) -> Dict[str, Any]:
+        """Build agent objects for one envid using shared core overlay assembly.
 
-        if not graph_echo_cfg.get("enabled", True):
-            pass
-        else:
-            self.agents["graph_echo"] = GraphEchoAgent(
+        Input: resolved envid or None.
+        Output: agent id -> agent instance map.
+        """
+
+        built: Dict[str, Any] = {}
+
+        echo_cfg = AgentBase.assemble_runtime_config(self.config, "echo", envid=envid)
+        math_cfg = AgentBase.assemble_runtime_config(self.config, "math", envid=envid)
+        graph_echo_cfg = AgentBase.assemble_runtime_config(self.config, "graph_echo", envid=envid)
+
+        if echo_cfg.get("enabled", True):
+            built["echo"] = EchoAgent(self.config, {"name": "echo", **echo_cfg})
+
+        if math_cfg.get("enabled", True):
+            built["math"] = MathAgent(self.config, {"name": "math", **math_cfg})
+
+        if graph_echo_cfg.get("enabled", True):
+            built["graph_echo"] = GraphEchoAgent(
                 self.config,
                 {"name": "graph_echo", **graph_echo_cfg},
             )
+
+        return built
+
+    def _agents_for_envid(self, envid: str | None) -> Dict[str, Any]:
+        """Get cached agent map for envid, building it on first use."""
+
+        if envid in self._agents_by_envid:
+            return self._agents_by_envid[envid]
+        self._agents_by_envid[envid] = self._build_agents_for_envid(envid)
+        return self._agents_by_envid[envid]
 
     def _build_graph(self):
         """Build LangGraph workflow for routing, execution and retry/fallback."""
@@ -130,7 +151,9 @@ class AgentOrchestrator:
         """Validate requested agent and mark task as running."""
         task_id = state["task_id"]
         agent_name = state.get("agent", "")
-        if agent_name not in self.agents:
+        envid = str((state.get("context", {}) or {}).get("envid", "")).strip() or None
+        agents = self._agents_for_envid(envid)
+        if agent_name not in agents:
             err = f"Agent '{agent_name}' not found"
             self._set_task(task_id, status="error", result={"error": err})
             return {"status": "error", "error": err}
@@ -148,9 +171,11 @@ class AgentOrchestrator:
         agent_name = state["agent"]
         query = state["query"]
         context = {**(state.get("context", {}) or {}), "task_id": task_id}
+        envid = str(context.get("envid", "")).strip() or None
+        agents = self._agents_for_envid(envid)
 
         try:
-            result = await self.agents[agent_name].handle(query, context)
+            result = await agents[agent_name].handle(query, context)
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result.get("error")))
             self._set_task(task_id, status="done", result=result)
@@ -197,16 +222,18 @@ class AgentOrchestrator:
         """Run fallback agent if the primary agent failed permanently."""
         task_id = state["task_id"]
         fallback_agent = str(state.get("fallback_agent", "")).strip()
-        if not fallback_agent or fallback_agent not in self.agents:
+        context = {**(state.get("context", {}) or {}), "task_id": task_id}
+        envid = str(context.get("envid", "")).strip() or None
+        agents = self._agents_for_envid(envid)
+        if not fallback_agent or fallback_agent not in agents:
             err = "Fallback agent is not configured"
             self._set_task(task_id, status="error", result={"error": err})
             return {"status": "error", "error": err}
 
         query = state["query"]
-        context = {**(state.get("context", {}) or {}), "task_id": task_id}
         self._set_task(task_id, status="running", result={"fallback": fallback_agent})
         try:
-            result = await self.agents[fallback_agent].handle(query, context)
+            result = await agents[fallback_agent].handle(query, context)
             self._set_task(task_id, status="done", result={"via_fallback": fallback_agent, **result})
             return {"status": "done", "result": {"via_fallback": fallback_agent, **result}}
         except Exception as e:
@@ -225,15 +252,16 @@ class AgentOrchestrator:
         return "done" if state.get("status") == "done" else "error"
 
     def list_agents(self):
-        return list(self.agents.keys())
+        return list(self._agents_for_envid(None).keys())
 
     def get_agent_info(self, agent_name: str, limit: int = 20) -> dict[str, Any]:
         """Return runtime metadata and recent task history for one agent."""
-        if agent_name not in self.agents:
+        agents = self._agents_for_envid(None)
+        if agent_name not in agents:
             return {}
 
         safe_limit = max(1, min(100, int(limit)))
-        agent = self.agents[agent_name]
+        agent = agents[agent_name]
         tasks = []
         stats = {"pending": 0, "running": 0, "retrying": 0, "done": 0, "error": 0, "total": 0}
 
@@ -272,20 +300,24 @@ class AgentOrchestrator:
 
     async def submit(self, agent_name: str, query: str, context=None) -> str:
         """Create a new task and schedule LangGraph execution."""
-        if agent_name not in self.agents:
+        ctx = context or {}
+        envid = str(ctx.get("envid", "")).strip() or None
+        agents = self._agents_for_envid(envid)
+        if agent_name not in agents:
             raise ValueError(f"Agent '{agent_name}' not found")
         task_id = str(uuid.uuid4())
         now = self._utcnow_iso()
         self.tasks[task_id] = {
             "status": "pending",
             "agent": agent_name,
+            "envid": envid,
             "query": query,
             "result": None,
             "retries": 0,
             "created_at": now,
             "updated_at": now,
         }
-        asyncio.create_task(self._run_task(task_id, agent_name, query, context))
+        asyncio.create_task(self._run_task(task_id, agent_name, query, ctx))
         return task_id
 
     async def _run_task(self, task_id, agent_name, query, context):

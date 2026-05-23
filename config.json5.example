@@ -188,6 +188,50 @@
     },
   },
 
+  // Optional environment overlays for per-chat/per-tenant behavior.
+  "envids": {
+    "enabled": false,
+    "strict_matching": false,
+    // Optional deterministic order. Remaining items follow declaration order.
+    "startup_order": [
+      // "group_alpha",
+      // "group_beta"
+    ],
+    // Optional per-adapter order overrides.
+    "adapter_startup_order": {
+      // "telegram": ["group_alpha", "group_beta"]
+    },
+    "items": {
+      // "group_alpha": {
+      //   "title": "Telegram group alpha",
+      //   "matching": {
+      //     "adapters": {
+      //       "telegram": {
+      //         "chat_ids": [-1001234567890],
+      //         "chat_usernames": ["group_alpha"],
+      //         "chat_types": ["group", "supergroup"]
+      //       }
+      //     }
+      //   },
+      //   "runtime": { "enabled": true },
+      //   "config": {
+      //     "adapters": {
+      //       "items": {
+      //         "telegram": { "default_agent": "echo" }
+      //       }
+      //     },
+      //     "agents": {
+      //       "items": {
+      //         "echo": {
+      //           "instruction_files": ["${AIBT_ROOT}/agent_files/group_alpha.md"]
+      //         }
+      //       }
+      //     }
+      //   }
+      // }
+    }
+  },
+
   // Cron adapter configuration (for scheduled task execution).
   "cron": {
     "enabled": true,

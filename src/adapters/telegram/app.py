@@ -32,19 +32,10 @@ class TelegramAdapter(Adapter):
             orchestrator: AgentOrchestrator instance
             config: Full application config (reads adapters.items.telegram)
         """
-        super().__init__(config)
+        super().__init__(config, adapter_id="telegram")
         self.orchestrator = orchestrator
-        
-        # Read Telegram settings from adapters.items.telegram in config
-        telegram_config = self.config.get("adapters", {}).get("items", {}).get("telegram", {})
-        self.enabled = telegram_config.get("enabled", False)
-        self.token = telegram_config.get("token")
-        self.default_agent = telegram_config.get("default_agent", "echo")
-        self.polling = telegram_config.get("polling", True)
-        self.polling_timeout = telegram_config.get("polling_timeout", 30)
-        self.listen_private = bool(telegram_config.get("listen_private", True))
-        self.listen_groups = bool(telegram_config.get("listen_groups", True))
-        self.dialog_log_type = str(telegram_config.get("dialog_log_type", "telegram_dialog"))
+        self._base_adapter_config = self.assemble_runtime_config(envid=None)
+        self._apply_adapter_config(self._base_adapter_config)
         
         self.app = None
         self.bot = None
@@ -64,6 +55,23 @@ class TelegramAdapter(Adapter):
                 "error",
                 f"TelegramAdapter enabled but cannot start (has_token={bool(self.token)}, dependency_ready={bool(Bot and Application and ChatAction)})",
             )
+
+    def _apply_adapter_config(self, telegram_config: dict[str, Any]) -> None:
+        """Apply assembled adapter config to runtime fields.
+
+        Input: resolved adapter config section.
+        Output: instance fields updated.
+        """
+
+        cfg = telegram_config if isinstance(telegram_config, dict) else {}
+        self.enabled = bool(cfg.get("enabled", False))
+        self.token = cfg.get("token")
+        self.default_agent = str(cfg.get("default_agent", "echo"))
+        self.polling = bool(cfg.get("polling", True))
+        self.polling_timeout = int(cfg.get("polling_timeout", 30))
+        self.listen_private = bool(cfg.get("listen_private", True))
+        self.listen_groups = bool(cfg.get("listen_groups", True))
+        self.dialog_log_type = str(cfg.get("dialog_log_type", "telegram_dialog"))
 
     def _is_chat_allowed(self, update: "Update") -> bool:
         """Check if incoming chat type is enabled in Telegram adapter settings."""
@@ -131,16 +139,37 @@ class TelegramAdapter(Adapter):
         Returns:
             dict with 'result' key containing agent response
         """
-        if not self.enabled or not self.bot:
-            log("adapters.telegram", "debug", f"adapter disabled or bot not ready")
-            return {"error": "Telegram adapter not enabled"}
-        
         context = context or {}
-        agent_id = agent_id or self.default_agent
+        event_ctx = {
+            "chat_id": context.get("chat_id", user_id),
+            "chat_username": context.get("chat_username", ""),
+            "chat_type": context.get("chat_type", ""),
+        }
+        explicit_envid = str(context.get("envid", "")).strip() or None
+        try:
+            envid = self.resolve_envid(event_ctx, explicit_envid=explicit_envid)
+        except Exception as e:
+            log("adapters.telegram", "warning", f"envid resolution failed: {e}")
+            return {"error": f"envid resolution failed: {e}"}
+
+        runtime_cfg = self.assemble_runtime_config(envid=envid)
+        runtime_enabled = bool(runtime_cfg.get("enabled", self.enabled))
+        default_agent = str(runtime_cfg.get("default_agent", self.default_agent) or self.default_agent)
+
+        if not runtime_enabled or not self.bot:
+            log("adapters.telegram", "debug", "adapter disabled or bot not ready")
+            return {"error": "Telegram adapter not enabled"}
+
+        agent_id = agent_id or default_agent
         chat_id = int(user_id)
+        context = {**context, "envid": envid} if envid else dict(context)
         
-        log("adapters.telegram", "info", f"received message from user {chat_id}: '{message[:50]}{'...' if len(message) > 50 else ''}'")
-        log("adapters.telegram", "debug", f"routing to agent '{agent_id}'")
+        log(
+            "adapters.telegram",
+            "info",
+            f"received message from user {chat_id} envid={envid or '-'}: '{message[:50]}{'...' if len(message) > 50 else ''}'",
+        )
+        log("adapters.telegram", "debug", f"routing to agent '{agent_id}' envid={envid or '-'}")
 
         # Submit task to orchestrator
         try:
@@ -326,7 +355,17 @@ class TelegramAdapter(Adapter):
         
         try:
             # Route message through adapter
-            result = await self.handle(str(chat_id), "", text, context={"update": update})
+            result = await self.handle(
+                str(chat_id),
+                "",
+                text,
+                context={
+                    "update": update,
+                    "chat_id": chat_id,
+                    "chat_type": getattr(update.effective_chat, "type", ""),
+                    "chat_username": getattr(update.effective_chat, "username", ""),
+                },
+            )
             
             # Send response back to Telegram
             response_text = result.get("result") or result.get("error") or "No response"

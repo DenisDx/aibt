@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import os
 from typing import Any
 
+from core.envid_runtime import assemble_component_config
 from core.logging_utils import log
 from memory.tools import MemoryTools
 
@@ -20,6 +21,28 @@ class AgentBase(ABC):
         self.memory_tools = MemoryTools(root_dir, self.app_config)
         self.chain = self.build_chain()
 
+    @classmethod
+    def assemble_runtime_config(
+        cls,
+        root_config: dict[str, Any],
+        agent_id: str,
+        envid: str | None = None,
+        local_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble final agent config via shared core overlay rules.
+
+        Input: root config, agent id, optional envid and local layer.
+        Output: final `agents.items.<agent_id>` config section.
+        """
+
+        return assemble_component_config(
+            component_type="agent",
+            component_id=agent_id,
+            envid=envid,
+            root_config=root_config,
+            local_config=local_config,
+        )
+
     @abstractmethod
     def build_chain(self):
         """Build and return LangChain runnable chain."""
@@ -27,6 +50,8 @@ class AgentBase(ABC):
     async def handle(self, query: str, context=None) -> dict:
         """Execute LangChain chain and return unified result payload."""
         ctx = context or {}
+        envid = str(ctx.get("envid", "")).strip() or None
+        profile_id = str(ctx.get("chat_id") or ctx.get("user_id") or "").strip() or None
         memory_context = ""
         memory_meta: dict[str, Any] = {"semantic_hits": 0, "doc_hits": 0, "summary_hit": False, "procedural_items": 0}
 
@@ -35,17 +60,18 @@ class AgentBase(ABC):
                 agent_id=self.name,
                 query=query,
                 limit=5,
+                envid=envid,
             )
             doc_hits = self.memory_tools.search_docs(
                 query=query,
                 corpora=self._allowed_corpora(),
                 limit=6,
             )
-            procedural_memory = self.memory_tools.get_procedural_memory(agent_id=self.name, limit=3)
+            procedural_memory = self.memory_tools.get_procedural_memory(agent_id=self.name, limit=3, envid=envid)
             session_summary: dict[str, Any] = {}
             task_id = str(ctx.get("task_id", "") or "").strip()
             if task_id:
-                session_summary = self.memory_tools.get_session_summary(agent_id=self.name, thread_id=task_id)
+                session_summary = self.memory_tools.get_session_summary(agent_id=self.name, thread_id=task_id, envid=envid)
             memory_meta["semantic_hits"] = len(semantic_hits)
             memory_meta["doc_hits"] = len(doc_hits)
             memory_meta["summary_hit"] = bool(session_summary)
@@ -70,7 +96,17 @@ class AgentBase(ABC):
                 text=f"query={query[:500]} result={str(content)[:1000]}",
                 task_id=str(ctx.get("task_id", "")) or None,
                 outcome="ok",
+                envid=envid,
             )
+            if profile_id:
+                self.memory_tools.remember_profile_fact(
+                    agent_id=self.name,
+                    profile_id=profile_id,
+                    text=f"recent_query={query[:280]} recent_result={str(content)[:280]}",
+                    scope="dialogue",
+                    importance=0.35,
+                    envid=envid,
+                )
         except Exception as e:
             log("agents", "warning", f"Failed to record episode for agent={self.name}: {e}")
 

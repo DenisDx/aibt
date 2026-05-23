@@ -32,6 +32,7 @@ class MemoryService:
         self.store = MemoryStore(root_dir, config)
         self._initialized = False
         self.corpus_card_root = os.path.join(self.data_root, "corpora")
+        self.agent_root = os.path.join(self.data_root, "env")
 
     def initialize(self) -> None:
         """Prepare directories and database schema.
@@ -43,10 +44,19 @@ class MemoryService:
         if self._initialized:
             return
         os.makedirs(self.data_root, exist_ok=True)
-        os.makedirs(os.path.join(self.data_root, "agent"), exist_ok=True)
+        os.makedirs(os.path.join(self.data_root, "env"), exist_ok=True)
         os.makedirs(self.corpus_card_root, exist_ok=True)
         self.store.ensure_schema()
         self._initialized = True
+
+    def _agent_root_dir(self) -> str:
+        """Return agent root directory with backward-compatible fallback.
+
+        Input: none.
+        Output: absolute agent root path.
+        """
+
+        return str(getattr(self, "agent_root", os.path.join(self.data_root, "env")))
 
     def ingest_document(
         self,
@@ -229,7 +239,14 @@ class MemoryService:
         rows = self.store.list_namespace_items(namespace, limit=limit, offset=offset)
         return [dict(row) for row in rows]
 
-    def get_agent_namespace_items(self, agent_id: str, namespace: str, limit: int = 100, profile_id: str | None = None) -> list[dict[str, Any]]:
+    def get_agent_namespace_items(
+        self,
+        agent_id: str,
+        namespace: str,
+        limit: int = 100,
+        profile_id: str | None = None,
+        envid: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Read agent namespace records.
 
         Input: agent id, namespace name, limit, and optional profile id.
@@ -239,8 +256,8 @@ class MemoryService:
         clean_agent = self._safe_name(agent_id)
         clean_ns = self._safe_name(namespace)
         if clean_ns == "profiles" and profile_id:
-            return self.get_profile_memory(clean_agent, profile_id, limit=limit)
-        return self.list_namespace_items(("agent", clean_agent, clean_ns), limit=limit)
+            return self.get_profile_memory(clean_agent, profile_id, limit=limit, envid=envid)
+        return self.list_namespace_items(self._namespace_tuple(clean_agent, clean_ns, envid=envid), limit=limit)
 
     def refresh_corpus_card(self, corpus_id: str) -> dict[str, Any]:
         """Refresh a lightweight corpus summary card.
@@ -295,7 +312,13 @@ class MemoryService:
         self.initialize()
         return self.store.soft_delete_document(doc_id)
 
-    def _namespace_tuple(self, agent_id: str, namespace: str, *parts: str) -> tuple[str, ...]:
+    def _namespace_tuple(
+        self,
+        agent_id: str,
+        namespace: str,
+        *parts: str,
+        envid: str | None = None,
+    ) -> tuple[str, ...]:
         """Build a durable namespace path.
 
         Input: agent id, namespace name, optional tail parts.
@@ -305,7 +328,8 @@ class MemoryService:
         clean_agent = self._safe_name(agent_id)
         clean_ns = self._safe_name(namespace)
         clean_parts = [self._safe_name(part) for part in parts if str(part).strip()]
-        return ("agent", clean_agent, clean_ns, *clean_parts)
+        clean_env = self._safe_name(envid) if str(envid or "").strip() else "global"
+        return ("env", clean_env, "agent", clean_agent, clean_ns, *clean_parts)
 
     def put_namespace_item(
         self,
@@ -323,12 +347,13 @@ class MemoryService:
         self.initialize()
         item_key = str(key or payload.get("ts") or f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
         self.store.put_namespace_item(namespace, item_key, payload)
-        if mirror_jsonl and len(namespace) >= 3 and namespace[0] == "agent":
-            agent_id = str(namespace[1])
-            namespace_name = str(namespace[2])
-            if len(namespace) == 4 and namespace_name == "profiles":
-                namespace_name = f"profiles_{namespace[3]}"
-            self._append_namespace_item(agent_id, namespace_name, payload)
+        if mirror_jsonl and len(namespace) >= 5 and namespace[0] == "env" and namespace[2] == "agent":
+            envid = str(namespace[1])
+            agent_id = str(namespace[3])
+            namespace_name = str(namespace[4])
+            if len(namespace) == 6 and namespace_name == "profiles":
+                namespace_name = f"profiles_{namespace[5]}"
+            self._append_namespace_item(envid, agent_id, namespace_name, payload)
         return item_key
 
     def read_namespace_items(self, namespace: tuple[str, ...], limit: int = 100) -> list[dict[str, Any]]:
@@ -367,19 +392,57 @@ class MemoryService:
 
         self.initialize()
         ids: set[str] = set()
+        agent_root = self._agent_root_dir()
         try:
-            for namespace in self.store.list_namespace_paths(prefix=("agent",)):
-                if len(namespace) >= 2:
-                    ids.add(str(namespace[1]))
+            for namespace in self.store.list_namespace_paths(prefix=("env",)):
+                if len(namespace) >= 4 and namespace[2] == "agent":
+                    ids.add(str(namespace[3]))
         except Exception:
             pass
-        if os.path.isdir(self.agent_root):
-            for entry in os.listdir(self.agent_root):
-                if os.path.isdir(os.path.join(self.agent_root, entry)):
-                    ids.add(entry)
+        if os.path.isdir(agent_root):
+            for env_entry in os.listdir(agent_root):
+                env_path = os.path.join(agent_root, env_entry, "agent")
+                if not os.path.isdir(env_path):
+                    continue
+                for agent_entry in os.listdir(env_path):
+                    if os.path.isdir(os.path.join(env_path, agent_entry)):
+                        ids.add(agent_entry)
         return sorted(ids)
 
-    def record_episode(self, agent_id: str, text: str, task_id: str | None = None, outcome: str | None = None) -> dict[str, Any]:
+    def list_agent_scopes(self) -> list[tuple[str, str]]:
+        """List known (envid, agent_id) scopes.
+
+        Input: none.
+        Output: sorted list of scope tuples.
+        """
+
+        self.initialize()
+        scopes: set[tuple[str, str]] = set()
+        agent_root = self._agent_root_dir()
+        try:
+            for namespace in self.store.list_namespace_paths(prefix=("env",)):
+                if len(namespace) >= 4 and namespace[2] == "agent":
+                    scopes.add((str(namespace[1]), str(namespace[3])))
+        except Exception:
+            pass
+        if os.path.isdir(agent_root):
+            for env_entry in os.listdir(agent_root):
+                env_path = os.path.join(agent_root, env_entry, "agent")
+                if not os.path.isdir(env_path):
+                    continue
+                for agent_entry in os.listdir(env_path):
+                    if os.path.isdir(os.path.join(env_path, agent_entry)):
+                        scopes.add((env_entry, agent_entry))
+        return sorted(scopes)
+
+    def record_episode(
+        self,
+        agent_id: str,
+        text: str,
+        task_id: str | None = None,
+        outcome: str | None = None,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Append episodic event for an agent.
 
         Input: agent id, event text, optional task/outcome.
@@ -392,11 +455,18 @@ class MemoryService:
             "task_id": task_id,
             "outcome": outcome,
         }
-        namespace = self._namespace_tuple(agent_id, "episodic")
+        namespace = self._namespace_tuple(agent_id, "episodic", envid=envid)
         key = self.put_namespace_item(namespace, payload)
         return {"status": "ok", "namespace": namespace, "key": key, "path": "/".join((*namespace, key))}
 
-    def remember_fact(self, agent_id: str, text: str, scope: str | None = None, importance: float = 0.5) -> dict[str, Any]:
+    def remember_fact(
+        self,
+        agent_id: str,
+        text: str,
+        scope: str | None = None,
+        importance: float = 0.5,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Store semantic memory fact.
 
         Input: agent id, fact text, optional scope, importance score.
@@ -409,11 +479,17 @@ class MemoryService:
             "scope": scope,
             "importance": float(importance),
         }
-        namespace = self._namespace_tuple(agent_id, "semantic")
+        namespace = self._namespace_tuple(agent_id, "semantic", envid=envid)
         key = self.put_namespace_item(namespace, payload)
         return {"status": "ok", "namespace": namespace, "key": key, "path": "/".join((*namespace, key))}
 
-    def update_procedural_memory(self, agent_id: str, text: str, reason: str | None = None) -> dict[str, Any]:
+    def update_procedural_memory(
+        self,
+        agent_id: str,
+        text: str,
+        reason: str | None = None,
+        envid: str | None = None,
+    ) -> dict[str, Any]:
         """Store procedural memory update.
 
         Input: agent id, instruction text, optional reason.
@@ -425,18 +501,18 @@ class MemoryService:
             "text": text,
             "reason": reason,
         }
-        namespace = self._namespace_tuple(agent_id, "procedural")
+        namespace = self._namespace_tuple(agent_id, "procedural", envid=envid)
         key = self.put_namespace_item(namespace, payload)
         return {"status": "ok", "namespace": namespace, "key": key, "path": "/".join((*namespace, key))}
 
-    def get_procedural_memory(self, agent_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def get_procedural_memory(self, agent_id: str, limit: int = 20, envid: str | None = None) -> list[dict[str, Any]]:
         """Read latest procedural memory records.
 
         Input: agent id and limit.
         Output: list of procedural records.
         """
 
-        return self.read_namespace_items(self._namespace_tuple(agent_id, "procedural"), limit=limit)
+        return self.read_namespace_items(self._namespace_tuple(agent_id, "procedural", envid=envid), limit=limit)
 
     def remember_profile_fact(
         self,
@@ -445,6 +521,7 @@ class MemoryService:
         text: str,
         scope: str | None = None,
         importance: float = 0.5,
+        envid: str | None = None,
     ) -> dict[str, Any]:
         """Store a user/channel profile fact.
 
@@ -459,20 +536,27 @@ class MemoryService:
             "importance": float(importance),
             "profile_id": profile_id,
         }
-        namespace = self._namespace_tuple(agent_id, "profiles", profile_id)
+        namespace = self._namespace_tuple(agent_id, "profiles", profile_id, envid=envid)
         key = self.put_namespace_item(namespace, payload, mirror_jsonl=False)
         return {"status": "ok", "namespace": namespace, "key": key, "path": "/".join((*namespace, key))}
 
-    def get_profile_memory(self, agent_id: str, profile_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def get_profile_memory(self, agent_id: str, profile_id: str, limit: int = 20, envid: str | None = None) -> list[dict[str, Any]]:
         """Read profile facts for one user/channel.
 
         Input: agent id, profile id, and limit.
         Output: list of profile facts.
         """
 
-        return self.read_namespace_items(self._namespace_tuple(agent_id, "profiles", profile_id), limit=limit)
+        return self.read_namespace_items(self._namespace_tuple(agent_id, "profiles", profile_id, envid=envid), limit=limit)
 
-    def recall_memory(self, agent_id: str, query: str, scope: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+    def recall_memory(
+        self,
+        agent_id: str,
+        query: str,
+        scope: str | None = None,
+        limit: int = 8,
+        envid: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Simple lexical recall from semantic and episodic namespaces.
 
         Input: agent id, query, optional scope, limit.
@@ -483,8 +567,8 @@ class MemoryService:
         if not q:
             return []
 
-        candidates = self.read_namespace_items(self._namespace_tuple(agent_id, "semantic"), limit=300)
-        candidates += self.read_namespace_items(self._namespace_tuple(agent_id, "episodic"), limit=300)
+        candidates = self.read_namespace_items(self._namespace_tuple(agent_id, "semantic", envid=envid), limit=300)
+        candidates += self.read_namespace_items(self._namespace_tuple(agent_id, "episodic", envid=envid), limit=300)
 
         if scope:
             candidates = [x for x in candidates if str(x.get("scope", "")).strip() == scope]
@@ -502,50 +586,51 @@ class MemoryService:
         scored.sort(key=lambda x: x.get("score", 0), reverse=True)
         return scored[: max(1, int(limit))]
 
-    def get_session_summary(self, agent_id: str, thread_id: str) -> dict[str, Any]:
+    def get_session_summary(self, agent_id: str, thread_id: str, envid: str | None = None) -> dict[str, Any]:
         """Return one session summary record by thread id.
 
         Input: agent id and thread id.
         Output: matching summary or empty result.
         """
 
-        items = self.read_namespace_items(self._namespace_tuple(agent_id, "summaries"), limit=500)
+        items = self.read_namespace_items(self._namespace_tuple(agent_id, "summaries", envid=envid), limit=500)
         for item in reversed(items):
             if str(item.get("thread_id", "")) == thread_id:
                 return item
         return {}
 
-    def get_agent_profile(self, agent_id: str) -> dict[str, Any]:
+    def get_agent_profile(self, agent_id: str, envid: str | None = None) -> dict[str, Any]:
         """Return aggregate agent memory profile.
 
         Input: agent id.
         Output: counters and latest timestamps per namespace.
         """
 
-        profile: dict[str, Any] = {"agent_id": agent_id, "namespaces": {}}
+        profile: dict[str, Any] = {"agent_id": agent_id, "envid": envid or "global", "namespaces": {}}
         for ns in ("semantic", "episodic", "procedural", "summaries"):
-            items = self.read_namespace_items(self._namespace_tuple(agent_id, ns), limit=1000)
+            items = self.read_namespace_items(self._namespace_tuple(agent_id, ns, envid=envid), limit=1000)
             profile["namespaces"][ns] = {
                 "count": len(items),
                 "latest_ts": items[-1].get("ts") if items else None,
             }
-        profiles_root = self._namespace_tuple(agent_id, "profiles")
+        profiles_root = self._namespace_tuple(agent_id, "profiles", envid=envid)
         profile["namespaces"]["profiles"] = {
             "count": self.count_namespace_items(profiles_root),
             "latest_ts": None,
         }
         return profile
 
-    def _namespace_file(self, agent_id: str, namespace: str) -> str:
+    def _namespace_file(self, envid: str, agent_id: str, namespace: str) -> str:
         """Build namespace file path.
 
         Input: agent id and namespace.
         Output: absolute jsonl file path.
         """
 
+        safe_env = "".join(ch for ch in envid if ch.isalnum() or ch in ("-", "_")) or "global"
         safe_agent = "".join(ch for ch in agent_id if ch.isalnum() or ch in ("-", "_")) or "agent"
         safe_ns = "".join(ch for ch in namespace if ch.isalnum() or ch in ("-", "_")) or "data"
-        p = Path(self.data_root) / "agent" / safe_agent
+        p = Path(self.data_root) / "env" / safe_env / "agent" / safe_agent
         p.mkdir(parents=True, exist_ok=True)
         return str(p / f"{safe_ns}.jsonl")
 
@@ -567,14 +652,14 @@ class MemoryService:
 
         return str(Path(self.corpus_card_root) / f"{self._safe_name(corpus_id)}.json")
 
-    def _append_namespace_item(self, agent_id: str, namespace: str, payload: dict[str, Any]) -> str:
+    def _append_namespace_item(self, envid: str, agent_id: str, namespace: str, payload: dict[str, Any]) -> str:
         """Append one JSON line record.
 
         Input: namespace identifiers and payload.
         Output: file path where item was written.
         """
 
-        path = self._namespace_file(agent_id, namespace)
+        path = self._namespace_file(envid, agent_id, namespace)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=True) + "\n")
         return path
@@ -586,14 +671,15 @@ class MemoryService:
         Output: list of parsed records.
         """
 
-        if len(namespace) < 3 or namespace[0] != "agent":
+        if len(namespace) < 5 or namespace[0] != "env" or namespace[2] != "agent":
             return []
-        agent_id = str(namespace[1])
-        namespace_name = str(namespace[2])
-        if len(namespace) == 4 and namespace_name == "profiles":
-            namespace_name = f"profiles_{namespace[3]}"
+        envid = str(namespace[1])
+        agent_id = str(namespace[3])
+        namespace_name = str(namespace[4])
+        if len(namespace) == 6 and namespace_name == "profiles":
+            namespace_name = f"profiles_{namespace[5]}"
 
-        path = self._namespace_file(agent_id, namespace_name)
+        path = self._namespace_file(envid, agent_id, namespace_name)
         if not os.path.exists(path):
             return []
 
