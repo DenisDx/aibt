@@ -2,18 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
+import os
 import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, TypedDict
+from typing import Dict, Any, TypedDict, Type
 
 from langgraph.graph import END, StateGraph
 
 from agents.base import AgentBase
-from agents.echo.agent import EchoAgent
-from agents.math.agent import MathAgent
-from agents.graph_echo.agent import GraphEchoAgent
-from core.envid_runtime import load_environment_registry
+from adapters.adapter import Adapter
+from core.envid_runtime import assemble_component_config, load_environment_registry
 from core.logging_utils import log
 from memory.langgraph_runtime import build_langgraph_runtime
 
@@ -38,13 +39,142 @@ class AgentOrchestrator:
 
     def __init__(self, config=None):
         self.config = config or {}
+        self.root_dir = str(self.config.get("root") or self._default_root_dir())
+        self.agent_classes: Dict[str, Type[Any]] = self._discover_agent_classes()
+        self.adapter_classes: Dict[str, Type[Adapter]] = self._discover_adapter_classes()
         self.agents: Dict[str, Any] = {}
+        self.adapters: Dict[str, Adapter] = {}
         self._agents_by_envid: Dict[str | None, Dict[str, Any]] = {}
         self.tasks: Dict[str, dict] = {}  # id -> {status, agent, query, result}
-        root_dir = str(self.config.get("root") or "")
-        self.checkpointer, self.store = build_langgraph_runtime(root_dir, self.config, "orchestrator")
+        self.checkpointer, self.store = build_langgraph_runtime(self.root_dir, self.config, "orchestrator")
         self._init_agents()
+        self._init_adapters()
         self.graph = self._build_graph()
+
+    @staticmethod
+    def _default_root_dir() -> str:
+        """Resolve project root when root is not present in runtime config."""
+
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def _discover_agent_classes(self) -> Dict[str, Type[Any]]:
+        """Discover agent classes from src/agents/*/agent.py modules."""
+
+        return self._discover_component_classes(
+            component_dir="agents",
+            module_file="agent",
+            class_suffix="Agent",
+            component_label="agent",
+            base_class=AgentBase,
+        )
+
+    def _discover_adapter_classes(self) -> Dict[str, Type[Adapter]]:
+        """Discover adapter classes from src/adapters/*/app.py modules."""
+
+        classes = self._discover_component_classes(
+            component_dir="adapters",
+            module_file="app",
+            class_suffix="Adapter",
+            component_label="adapter",
+            base_class=Adapter,
+        )
+        return {k: v for k, v in classes.items() if k != "adapter"}
+
+    def _discover_component_classes(
+        self,
+        component_dir: str,
+        module_file: str,
+        class_suffix: str,
+        component_label: str,
+        base_class: type,
+    ) -> Dict[str, Type[Any]]:
+        """Discover component classes from src/<component_dir>/*/<module_file>.py."""
+
+        discovered: Dict[str, Type[Any]] = {}
+        root = os.path.join(self.root_dir, "src", component_dir)
+        if not os.path.isdir(root):
+            log("core", "error", f"{component_label} discovery skipped: missing directory {root}", tag="orchestrator")
+            return discovered
+
+        for entry in sorted(os.listdir(root)):
+            if entry.startswith("_"):
+                continue
+            entry_path = os.path.join(root, entry)
+            module_path = os.path.join(entry_path, f"{module_file}.py")
+            if not os.path.isdir(entry_path):
+                continue
+            if not os.path.isfile(module_path):
+                log(
+                    "core",
+                    "error",
+                    f"{component_label.title()} directory '{entry_path}' is missing required file '{module_file}.py'",
+                    tag="orchestrator",
+                )
+                continue
+
+            module_name = f"{component_dir}.{entry}.{module_file}"
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as e:
+                log(
+                    "core",
+                    "error",
+                    f"Failed to import {component_label} module {module_name}: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
+                continue
+
+            cls = self._pick_component_class(module, class_suffix, base_class)
+            if cls is None:
+                log(
+                    "core",
+                    "error",
+                    f"No valid {component_label} class found in module {module_name}",
+                    tag="orchestrator",
+                )
+                continue
+
+            discovered[entry] = cls
+
+        log("core", "info", f"Discovered {len(discovered)} {component_label}(s): {', '.join(discovered.keys()) or '-'}", tag="orchestrator")
+        return discovered
+
+    @staticmethod
+    def _pick_component_class(module: Any, suffix: str, base_class: type) -> Type[Any] | None:
+        """Pick best component class from module members."""
+
+        candidates: list[type] = []
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj.__module__ != module.__name__:
+                continue
+            if obj is base_class:
+                continue
+            candidates.append(obj)
+
+        if not candidates:
+            return None
+
+        named = [obj for obj in candidates if obj.__name__.endswith(suffix)]
+
+        for obj in named:
+            if issubclass(obj, base_class):
+                return obj
+
+        for obj in named:
+            handle = getattr(obj, "handle", None)
+            if inspect.iscoroutinefunction(handle):
+                return obj
+
+        for obj in candidates:
+            if issubclass(obj, base_class):
+                return obj
+
+        for obj in candidates:
+            handle = getattr(obj, "handle", None)
+            if inspect.iscoroutinefunction(handle):
+                return obj
+
+        return candidates[0]
 
     def _init_agents(self):
         """Initialize default agent registry and prewarm configured envid registries."""
@@ -55,6 +185,43 @@ class AgentOrchestrator:
         for envid in load_environment_registry(self.config).keys():
             self._agents_by_envid[envid] = self._build_agents_for_envid(envid)
 
+    def _init_adapters(self) -> None:
+        """Initialize adapter registry from discovered adapter classes."""
+
+        self.adapters = self._build_adapters()
+
+    def _build_adapters(self) -> Dict[str, Adapter]:
+        """Instantiate discovered adapters with runtime configuration."""
+
+        built: Dict[str, Adapter] = {}
+        for adapter_id, adapter_cls in self.adapter_classes.items():
+            try:
+                cfg = assemble_component_config(
+                    component_type="adapter",
+                    component_id=adapter_id,
+                    envid=None,
+                    root_config=self.config,
+                    local_config=None,
+                )
+                if cfg.get("enabled") is False:
+                    log("core", "info", f"Adapter '{adapter_id}' is disabled by config", tag="orchestrator")
+                    continue
+
+                try:
+                    instance = adapter_cls(self, self.config)
+                except TypeError:
+                    instance = adapter_cls(self)
+
+                built[adapter_id] = instance
+            except Exception as e:
+                log(
+                    "core",
+                    "error",
+                    f"Failed to initialize adapter '{adapter_id}': {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
+        return built
+
     def _build_agents_for_envid(self, envid: str | None) -> Dict[str, Any]:
         """Build agent objects for one envid using shared core overlay assembly.
 
@@ -63,24 +230,29 @@ class AgentOrchestrator:
         """
 
         built: Dict[str, Any] = {}
-
-        echo_cfg = AgentBase.assemble_runtime_config(self.config, "echo", envid=envid)
-        math_cfg = AgentBase.assemble_runtime_config(self.config, "math", envid=envid)
-        graph_echo_cfg = AgentBase.assemble_runtime_config(self.config, "graph_echo", envid=envid)
-
-        if echo_cfg.get("enabled", True):
-            built["echo"] = EchoAgent(self.config, {"name": "echo", **echo_cfg})
-
-        if math_cfg.get("enabled", True):
-            built["math"] = MathAgent(self.config, {"name": "math", **math_cfg})
-
-        if graph_echo_cfg.get("enabled", True):
-            built["graph_echo"] = GraphEchoAgent(
-                self.config,
-                {"name": "graph_echo", **graph_echo_cfg},
-            )
-
+        for agent_id, agent_cls in self.agent_classes.items():
+            cfg = AgentBase.assemble_runtime_config(self.config, agent_id, envid=envid)
+            if cfg.get("enabled", True) is False:
+                continue
+            try:
+                built[agent_id] = self._instantiate_agent(agent_id, agent_cls, cfg)
+            except Exception as e:
+                log(
+                    "core",
+                    "error",
+                    f"Failed to initialize agent '{agent_id}' for envid={envid or '-'}: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
         return built
+
+    def _instantiate_agent(self, agent_id: str, agent_cls: Type[Any], cfg: dict[str, Any]) -> Any:
+        """Instantiate one agent class with fallback constructor signatures."""
+
+        agent_cfg = {"name": agent_id, **cfg}
+        try:
+            return agent_cls(self.config, agent_cfg)
+        except TypeError:
+            return agent_cls(self.config)
 
     def _agents_for_envid(self, envid: str | None) -> Dict[str, Any]:
         """Get cached agent map for envid, building it on first use."""

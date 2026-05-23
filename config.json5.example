@@ -54,6 +54,7 @@
       "echo": { "enabled": true },
       "math": { "enabled": true },
       "graph_echo": { "enabled": true },
+      "chat_group_helper": { "enabled": true },
       // Example per-agent corpus allowlist.
       // "researcher": {
       //   "enabled": true,
@@ -166,7 +167,7 @@
       "telegram": {
         "enabled": false,  // Set to true and provide TELEGRAM_BOT_TOKEN to enable
         "token": "${TELEGRAM_BOT_TOKEN}",  // Telegram Bot token from @BotFather
-        "default_agent": "echo",  // Agent to use for Telegram messages
+        "default_agent": "chat_group_helper",  // Agent to use for Telegram messages
         "polling": true,  // Use polling (true) or webhook (false)
         "polling_timeout": 30,  // Polling timeout in seconds
         "listen_private": true,  // Listen to private chats

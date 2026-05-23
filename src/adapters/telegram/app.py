@@ -3,11 +3,13 @@ TelegramAdapter: Adapter for Telegram bot integration (unified interface).
 Handles incoming messages from Telegram users and routes them to agents via orchestrator.
 """
 import asyncio
+from collections import defaultdict
 import json
 import traceback
 from typing import Any
 from adapters.adapter import Adapter
 from core.logging_utils import log
+from memory.tools import MemoryTools
 
 try:
     from telegram import Bot, Update
@@ -36,11 +38,15 @@ class TelegramAdapter(Adapter):
         self.orchestrator = orchestrator
         self._base_adapter_config = self.assemble_runtime_config(envid=None)
         self._apply_adapter_config(self._base_adapter_config)
+        root_dir = str((config or {}).get("root") or "")
+        self.memory_tools = MemoryTools(root_dir, config or {})
         
         self.app = None
         self.bot = None
         self._stop_event = asyncio.Event()
         self._polling_active = False
+        self._recent_group_messages: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._bot_usernames: set[str] = set()
         
         if self.enabled and self.token and Bot:
             self.bot = Bot(token=self.token)
@@ -66,12 +72,171 @@ class TelegramAdapter(Adapter):
         cfg = telegram_config if isinstance(telegram_config, dict) else {}
         self.enabled = bool(cfg.get("enabled", False))
         self.token = cfg.get("token")
-        self.default_agent = str(cfg.get("default_agent", "echo"))
+        self.default_agent = str(cfg.get("default_agent", "chat_group_helper"))
         self.polling = bool(cfg.get("polling", True))
         self.polling_timeout = int(cfg.get("polling_timeout", 30))
         self.listen_private = bool(cfg.get("listen_private", True))
         self.listen_groups = bool(cfg.get("listen_groups", True))
         self.dialog_log_type = str(cfg.get("dialog_log_type", "telegram_dialog"))
+
+    def _message_mentions_bot(self, update: "Update") -> bool:
+        """Return true when the message explicitly mentions this bot username."""
+
+        msg = getattr(update, "message", None)
+        text = str(getattr(msg, "text", "") or "")
+        if not text:
+            return False
+        lowered = text.lower()
+        if any(name and f"@{name}" in lowered for name in self._bot_usernames):
+            return True
+        entities = getattr(msg, "entities", None) or []
+        for ent in entities:
+            ent_type = str(getattr(ent, "type", "")).lower()
+            if ent_type != "mention":
+                continue
+            offset = int(getattr(ent, "offset", 0))
+            length = int(getattr(ent, "length", 0))
+            fragment = text[offset : offset + length].strip().lstrip("@").lower()
+            if fragment and fragment in self._bot_usernames:
+                return True
+        return False
+
+    def _is_direct_address(self, text: str) -> bool:
+        """Heuristic direct-address detector for group chat messages."""
+
+        clean = str(text or "").strip().lower()
+        if not clean:
+            return False
+        base_names = {"helper", "assistant", "бот", "bot"}
+        names = base_names | set(self._bot_usernames)
+        for name in names:
+            if not name:
+                continue
+            if clean.startswith(f"{name} ") or clean.startswith(f"{name},") or clean.startswith(f"{name}:"):
+                return True
+        return False
+
+    def _remember_recent_group_message(self, update: "Update") -> None:
+        """Cache small rolling group history for best-effort join ingest."""
+
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        msg = getattr(update, "message", None)
+        text = str(getattr(msg, "text", "") or "").strip()
+        chat_id = str(getattr(chat, "id", "") or "").strip()
+        if not chat_id or not text:
+            return
+
+        bucket = self._recent_group_messages[chat_id]
+        bucket.append(
+            {
+                "message_id": getattr(msg, "message_id", None),
+                "date": str(getattr(msg, "date", "") or ""),
+                "user_id": getattr(user, "id", None),
+                "username": getattr(user, "username", None),
+                "text": text,
+            }
+        )
+        self._recent_group_messages[chat_id] = bucket[-80:]
+
+    def _resolve_envid_for_chat(self, chat: Any) -> str | None:
+        """Resolve envid for one chat descriptor with Telegram matching fields."""
+
+        event_ctx = {
+            "chat_id": getattr(chat, "id", None),
+            "chat_username": getattr(chat, "username", ""),
+            "chat_type": getattr(chat, "type", ""),
+        }
+        try:
+            return self.resolve_envid(event_ctx, explicit_envid=None)
+        except Exception as e:
+            log("adapters.telegram", "warning", f"join ingest envid resolution failed: {e}")
+            return None
+
+    def _safe_corpus_id(self, chat_id: str) -> str:
+        """Build corpus id safe for storage using chat id as source."""
+
+        clean = "".join(ch for ch in str(chat_id) if ch.isalnum() or ch in ("-", "_"))
+        return f"telegram_group_{clean or 'unknown'}"
+
+    def _ingest_group_history_on_join(self, update: "Update") -> None:
+        """Best-effort initial join ingest into episodic memory and RAG queue."""
+
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        status = getattr(getattr(update, "my_chat_member", None), "new_chat_member", None)
+        chat_id = str(getattr(chat, "id", "") or "").strip()
+        if not chat_id:
+            return
+        envid = self._resolve_envid_for_chat(chat)
+        recent = self._recent_group_messages.get(chat_id, [])[-30:]
+        message = getattr(update, "effective_message", None)
+        message_id = str(getattr(message, "message_id", "") or "")
+        status_name = str(getattr(status, "status", "") or "")
+        dedup_key = f"initial_join:{chat_id}:{message_id or status_name}"
+
+        profile_id = f"join_import:{chat_id}"
+        try:
+            existing = self.memory_tools.get_profile_memory(
+                agent_id="chat_group_helper",
+                profile_id=profile_id,
+                limit=40,
+                envid=envid,
+            )
+            if any(dedup_key in str(item.get("text", "")) for item in existing):
+                return
+        except Exception:
+            existing = []
+
+        lines = [
+            f"join_dedup_key={dedup_key}",
+            f"adapter=telegram chat_id={chat_id} import_type=initial_join chat_type={getattr(chat, 'type', '')}",
+            f"chat_title={self._chat_name(update)}",
+            f"added_by_user_id={getattr(user, 'id', None)} added_by_username={getattr(user, 'username', None)}",
+            "note=telegram_api_has_no_full_history_endpoint_for_bots; using available recent seen messages",
+        ]
+        if recent:
+            lines.append("recent_messages:")
+            for item in recent:
+                lines.append(
+                    f"- id={item.get('message_id')} ts={item.get('date')} user={item.get('user_id')} @{item.get('username')}: {str(item.get('text', ''))[:240]}"
+                )
+        ingest_text = "\n".join(lines)
+
+        try:
+            self.memory_tools.record_episode(
+                agent_id="chat_group_helper",
+                text=ingest_text,
+                task_id=None,
+                outcome="initial_join_import",
+                envid=envid,
+            )
+            self.memory_tools.remember_profile_fact(
+                agent_id="chat_group_helper",
+                profile_id=profile_id,
+                text=f"{dedup_key} source=telegram chat_id={chat_id}",
+                scope="join_import",
+                importance=0.7,
+                envid=envid,
+            )
+            if len(ingest_text) >= 800:
+                self.memory_tools.ingest_document(
+                    source={
+                        "type": "text",
+                        "text": ingest_text,
+                        "metadata": {
+                            "adapter": "telegram",
+                            "chat_id": chat_id,
+                            "import_type": "initial_join",
+                            "dedup_key": dedup_key,
+                        },
+                    },
+                    corpus_id=self._safe_corpus_id(chat_id),
+                    title=f"telegram join import {chat_id}",
+                    tags=["telegram", "group", "initial_join", chat_id],
+                )
+        except Exception as e:
+            log("adapters.telegram", "warning", f"join ingest failed for chat={chat_id}: {e}")
 
     def _is_chat_allowed(self, update: "Update") -> bool:
         """Check if incoming chat type is enabled in Telegram adapter settings."""
@@ -291,6 +456,13 @@ class TelegramAdapter(Adapter):
             log("adapters.telegram", "debug", "Telegram application initialized")
             await self.app.start()
             log("adapters.telegram", "debug", "Telegram application started")
+            try:
+                me = await self.bot.get_me()
+                username = str(getattr(me, "username", "") or "").strip().lower()
+                if username:
+                    self._bot_usernames.add(username)
+            except Exception as e:
+                log("adapters.telegram", "warning", f"cannot resolve bot username: {e}")
             if not self.app.updater:
                 raise RuntimeError("Telegram updater is unavailable")
             await self.app.updater.start_polling(
@@ -350,6 +522,9 @@ class TelegramAdapter(Adapter):
         chat_id = update.effective_chat.id
         username = update.effective_user.username or f"user_{chat_id}"
         text = update.message.text
+        mentioned = self._message_mentions_bot(update)
+        direct_address = self._is_direct_address(text)
+        self._remember_recent_group_message(update)
         
         log("adapters.telegram", "debug", f"message handler: user {username} ({chat_id}), text_len={len(text)}")
         
@@ -361,11 +536,27 @@ class TelegramAdapter(Adapter):
                 text,
                 context={
                     "update": update,
+                    "adapter": "telegram",
                     "chat_id": chat_id,
                     "chat_type": getattr(update.effective_chat, "type", ""),
                     "chat_username": getattr(update.effective_chat, "username", ""),
+                    "message_id": getattr(update.message, "message_id", None),
+                    "user_id": getattr(update.effective_user, "id", None),
+                    "username": getattr(update.effective_user, "username", ""),
+                    "mentioned": mentioned,
+                    "direct_address": direct_address,
                 },
             )
+
+            if bool(result.get("skip_send", False)):
+                self._log_dialog_event(
+                    update=update,
+                    incoming_text=text,
+                    response_text=None,
+                    response_sent=False,
+                    error="ignored_by_policy",
+                )
+                return
             
             # Send response back to Telegram
             response_text = result.get("result") or result.get("error") or "No response"
@@ -436,3 +627,7 @@ class TelegramAdapter(Adapter):
             "notice",
             f"chat member update: chat={getattr(chat, 'id', '?')} type={getattr(chat, 'type', 'unknown')} title='{self._chat_name(update)}' status {old_status}->{new_status}",
         )
+        joined_statuses = {"member", "administrator"}
+        non_member_statuses = {"left", "kicked"}
+        if new_status in joined_statuses and old_status in non_member_statuses:
+            self._ingest_group_history_on_join(update)

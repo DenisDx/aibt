@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import secrets
@@ -145,18 +146,16 @@ class WebUIServer:
         self.started_event = asyncio.Event()
         self._restart_loop_time: float = 0.0
         self._server: Optional[uvicorn.Server] = None
-        self._telegram_task: Optional[asyncio.Task] = None
+        self._adapter_tasks: dict[str, asyncio.Task] = {}
         self.app = self._build_app()
 
         # Multi-agent orchestrator
         from orchestrator.orchestrator import AgentOrchestrator
         self.orchestrator = AgentOrchestrator(self.config)
-        # WebUI Adapter
-        from adapters.webui.app import WebUIAdapter
-        self.webui_adapter = WebUIAdapter(self.orchestrator)
-        # Telegram Adapter
-        from adapters.telegram.app import TelegramAdapter
-        self.telegram_adapter = TelegramAdapter(self.orchestrator, self.config)
+        self.adapters = dict(self.orchestrator.adapters)
+        self.webui_adapter = self.adapters.get("webui")
+        if self.webui_adapter is None:
+            raise RuntimeError("webui adapter is not discovered; ensure src/adapters/webui/app.py is valid")
         self.memory_service = get_memory_service(self.root_dir, self.config)
 
     def _agent_allowed_corpora(self, agent_id: str | None) -> list[str] | None:
@@ -757,19 +756,72 @@ class WebUIServer:
 
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _adapter_enabled(adapter: Any) -> bool:
+        """Return whether adapter should be started in runtime lifecycle."""
+
+        if hasattr(adapter, "enabled"):
+            return bool(getattr(adapter, "enabled"))
+        return True
+
+    @staticmethod
+    def _select_adapter_method(adapter: Any, names: tuple[str, ...]) -> tuple[str, Any] | None:
+        """Select first available callable adapter method from ordered names."""
+
+        for method_name in names:
+            method = getattr(adapter, method_name, None)
+            if callable(method):
+                return method_name, method
+        return None
+
+    def _start_adapter_task(self, adapter_id: str, adapter: Any) -> None:
+        """Start one adapter task using flexible lifecycle method names."""
+
+        selected = self._select_adapter_method(adapter, ("start_polling", "start", "run"))
+        if selected is None:
+            log("webui", "debug", f"Adapter '{adapter_id}' has no runtime start method")
+            return
+
+        method_name, starter = selected
+        try:
+            if inspect.iscoroutinefunction(starter):
+                task = asyncio.create_task(starter(), name=f"aibt-adapter-{adapter_id}")
+            else:
+                task = asyncio.create_task(asyncio.to_thread(starter), name=f"aibt-adapter-{adapter_id}")
+        except Exception as e:
+            log("webui", "error", f"Adapter '{adapter_id}' failed to start via {method_name}(): {e}\n{traceback.format_exc()}")
+            return
+        self._adapter_tasks[adapter_id] = task
+
+    async def _stop_adapter(self, adapter_id: str, adapter: Any) -> None:
+        """Stop one adapter using flexible lifecycle method names."""
+
+        selected = self._select_adapter_method(adapter, ("stop", "shutdown", "close"))
+        if selected is None:
+            return
+
+        method_name, stopper = selected
+        try:
+            if inspect.iscoroutinefunction(stopper):
+                await stopper()
+            else:
+                await asyncio.to_thread(stopper)
+        except Exception as e:
+            log("webui", "error", f"Adapter '{adapter_id}' stop failed via {method_name}(): {e}\n{traceback.format_exc()}")
+
     async def start(self) -> None:
         """Start uvicorn. Blocks until the server exits."""
         cfg = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         self._server = uvicorn.Server(cfg)
         log("webui", "info", f"Starting WebUI on {self.host}:{self.port}")
 
-        def _telegram_done(task: asyncio.Task) -> None:
+        def _adapter_done(adapter_id: str, task: asyncio.Task) -> None:
             try:
                 task.result()
             except asyncio.CancelledError:
-                log("webui", "notice", "Telegram polling task cancelled")
+                log("webui", "notice", f"Adapter task cancelled: {adapter_id}")
             except Exception as e:
-                log("webui", "error", f"Telegram polling task crashed: {e}\n{traceback.format_exc()}")
+                log("webui", "error", f"Adapter task crashed ({adapter_id}): {e}\n{traceback.format_exc()}")
 
         async def _watch() -> None:
             while self._server and not self._server.started and not self._server.should_exit:
@@ -777,26 +829,37 @@ class WebUIServer:
             if self._server and self._server.started:
                 self.started_event.set()
                 log("webui", "info", f"WebUI ready at http://{self.host}:{self.port}")
-                # Start Telegram polling if enabled
-                if self.telegram_adapter.enabled:
-                    log("webui", "info", "Starting Telegram polling task")
-                    self._telegram_task = asyncio.create_task(self.telegram_adapter.start_polling(), name="aibt-telegram-polling")
-                    self._telegram_task.add_done_callback(_telegram_done)
-                else:
-                    log("webui", "info", "Telegram polling disabled by configuration")
+                for adapter_id, adapter in self.adapters.items():
+                    if adapter_id == "webui":
+                        continue
+                    if not self._adapter_enabled(adapter):
+                        log("webui", "info", f"Adapter '{adapter_id}' disabled by configuration")
+                        continue
+                    log("webui", "info", f"Starting adapter task: {adapter_id}")
+                    self._start_adapter_task(adapter_id, adapter)
+                    task = self._adapter_tasks.get(adapter_id)
+                    if task is None:
+                        continue
+                    task.add_done_callback(lambda t, aid=adapter_id: _adapter_done(aid, t))
 
         asyncio.create_task(_watch())
         await self._server.serve()
 
     async def stop(self) -> None:
         """Signal uvicorn to shut down gracefully."""
-        await self.telegram_adapter.stop()
-        if self._telegram_task and not self._telegram_task.done():
+        for adapter_id, adapter in self.adapters.items():
+            await self._stop_adapter(adapter_id, adapter)
+
+        for adapter_id, task in list(self._adapter_tasks.items()):
+            if task.done():
+                continue
             try:
-                await asyncio.wait_for(self._telegram_task, timeout=5.0)
+                await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
-                log("webui", "warning", "Telegram polling task did not stop in time; cancelling")
-                self._telegram_task.cancel()
-                await asyncio.gather(self._telegram_task, return_exceptions=True)
+                log("webui", "warning", f"Adapter task did not stop in time; cancelling: {adapter_id}")
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self._adapter_tasks.clear()
+
         if self._server:
             self._server.should_exit = True

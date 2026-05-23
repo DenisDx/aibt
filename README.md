@@ -69,7 +69,7 @@ In `config.json5`:
     "telegram": {
       "enabled": true,
       "token": "${TELEGRAM_BOT_TOKEN}",
-      "default_agent": "echo",
+      "default_agent": "chat_group_helper",
       "polling": true
     }
   }
