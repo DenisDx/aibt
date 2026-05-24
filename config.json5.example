@@ -59,6 +59,7 @@
       "graph_echo": { "enabled": true },
       "chat_group_helper": {
         "enabled": true,
+        "recent_messages_limit": 50,
         "logging": {
           "log_llm": true
         }
@@ -179,6 +180,7 @@
         "show_typing": false,  // Show typing indicator while waiting for agent response
         "polling": true,  // Use polling (true) or webhook (false)
         "polling_timeout": 30,  // Polling timeout in seconds
+        "timeoutSeconds": 100,  // Max wait for one agent task before silent skip
         "listen_private": true,  // Listen to private chats
         "listen_groups": true,  // Listen to groups/supergroups where bot is added
         "dialog_log_type": "telegram_dialog",  // Dedicated file logs/<dialog_log_type>.log with input+reaction pairs

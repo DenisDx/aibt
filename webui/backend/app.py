@@ -280,6 +280,28 @@ class WebUIServer:
                 pass
         return "online"
 
+    def _inflight_task_stats(self) -> dict[str, int]:
+        """Count started-but-not-finished orchestrator tasks.
+
+        running: currently executing agent/fallback node.
+        retrying: failed attempt with active retry flow.
+        total: running + retrying.
+        """
+
+        running = 0
+        retrying = 0
+        for task in self.orchestrator.tasks.values():
+            status = str(task.get("status", "")).strip().lower()
+            if status == "running":
+                running += 1
+            elif status == "retrying":
+                retrying += 1
+        return {
+            "running": running,
+            "retrying": retrying,
+            "total": running + retrying,
+        }
+
     def _read_log(self, log_type: str, lines: int = 200) -> dict:
         """Read last N lines from logs/<log_type>.log.
 
@@ -304,6 +326,161 @@ class WebUIServer:
             return ["all"]
         types = sorted(f.stem for f in logs_dir.glob("*.log") if not f.name.startswith("."))
         return types or ["all"]
+
+    def _list_agent_llm_logs(self) -> list[str]:
+        """Return sorted list of agent LLM JSONL log files in logs/."""
+
+        logs_dir = Path(self.root_dir) / "logs"
+        if not logs_dir.is_dir():
+            return []
+        files = sorted(f.name for f in logs_dir.glob("*_llm.jsonl") if f.is_file() and not f.name.startswith("."))
+        return files
+
+    def _resolve_agent_llm_log_path(self, name: str) -> Path:
+        """Resolve safe file path for one *_llm.jsonl log name."""
+
+        clean = str(name or "").strip()
+        if not clean.endswith("_llm.jsonl"):
+            raise ValueError("invalid agent log file name")
+        if "/" in clean or "\\" in clean or clean.startswith("."):
+            raise ValueError("invalid agent log file name")
+        path = Path(self.root_dir) / "logs" / clean
+        if not path.exists() or not path.is_file():
+            raise ValueError("agent log file not found")
+        return path
+
+    @staticmethod
+    def _extract_last_user_preview(payload: dict[str, Any], request_messages: Any = None) -> str:
+        """Extract last user message preview from exact request or payload fallback."""
+
+        if isinstance(request_messages, list):
+            # on_chat_model_start for chat models provides a batch of message lists
+            batches = request_messages
+            if batches and isinstance(batches[0], list):
+                messages = batches[0]
+            else:
+                messages = batches
+            for item in reversed(messages):
+                if not isinstance(item, dict):
+                    continue
+                m_type = str(item.get("type", "") or item.get("role", "")).strip().lower()
+                if m_type in ("human", "user"):
+                    return str(item.get("content", "") or "")[:240]
+
+        if not isinstance(payload, dict):
+            return ""
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for item in reversed(messages):
+                if not isinstance(item, dict):
+                    continue
+                m_type = str(item.get("type", "") or "").strip().lower()
+                if m_type in ("human", "user"):
+                    return str(item.get("content", "") or "")[:240]
+            if messages:
+                tail = messages[-1]
+                if isinstance(tail, dict):
+                    return str(tail.get("content", "") or "")[:240]
+        return str(payload.get("query", "") or "")[:240]
+
+    @staticmethod
+    def _build_agent_log_view(path: Path, limit: int) -> dict[str, Any]:
+        """Build parsed exchange list from one *_llm.jsonl file."""
+
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        pending_input: list[dict[str, Any]] = []
+        pending_input_by_exchange: dict[str, dict[str, Any]] = {}
+        exchanges: list[dict[str, Any]] = []
+
+        def _is_request_row(obj: dict[str, Any]) -> bool:
+            if not isinstance(obj, dict):
+                return False
+            if "phase" in obj:
+                return str(obj.get("phase", "")).strip().lower() == "input"
+            return "messages" in obj and ("model" in obj or "stream" in obj)
+
+        def _is_response_row(obj: dict[str, Any]) -> bool:
+            if not isinstance(obj, dict):
+                return False
+            if "phase" in obj:
+                return str(obj.get("phase", "")).strip().lower() == "output"
+            return "choices" in obj or "error" in obj or "id" in obj
+
+        for idx, line in enumerate(lines, start=1):
+            text = str(line or "").strip()
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except Exception:
+                continue
+            if _is_request_row(row):
+                wrapped = {"line": idx, "raw": text, "data": row}
+                exchange_id = str(row.get("exchange_id") or "").strip()
+                if exchange_id:
+                    pending_input_by_exchange[exchange_id] = wrapped
+                else:
+                    pending_input.append(wrapped)
+                continue
+            if not _is_response_row(row):
+                continue
+
+            exchange_id = str(row.get("exchange_id") or "").strip()
+            input_row = pending_input_by_exchange.pop(exchange_id, None) if exchange_id else None
+            if input_row is None:
+                input_row = pending_input.pop(0) if pending_input else None
+            payload = input_row.get("data", {}).get("payload", {}) if input_row else {}
+            request_messages = input_row.get("data", {}).get("request_messages") if input_row else None
+            if request_messages is None and input_row:
+                request_messages = input_row.get("data", {}).get("messages")
+            request_messages_raw = input_row.get("raw") if input_row else None
+            request_prompts = input_row.get("data", {}).get("request_prompts") if input_row else None
+            if request_prompts is None and input_row:
+                request_prompts = input_row.get("data", {}).get("prompt")
+            request_prompts_raw = input_row.get("raw") if input_row else None
+            invocation_params = input_row.get("data", {}).get("invocation_params") if input_row else None
+            invocation_params_raw = input_row.get("data", {}).get("invocation_params_raw") if input_row else None
+            response = row.get("response") if isinstance(row, dict) else None
+            if response is None:
+                response = row
+            response_raw = row.get("response_raw") if isinstance(row, dict) else None
+            if response_raw is None:
+                response_raw = text
+            preview_source = response if response is not None else response_raw
+            response_text = preview_source if isinstance(preview_source, str) else json.dumps(preview_source, ensure_ascii=False, default=str)
+            exchanges.append(
+                {
+                    "entry_id": f"{path.name}:{idx}",
+                    "time": str(row.get("ts") or (input_row or {}).get("data", {}).get("ts") or ""),
+                    "agent_id": str(row.get("agent_id") or (input_row or {}).get("data", {}).get("agent_id") or ""),
+                    "envid": row.get("envid") if isinstance(row, dict) and row.get("envid") is not None else (input_row or {}).get("data", {}).get("envid"),
+                    "user_preview": WebUIServer._extract_last_user_preview(payload, request_messages=request_messages),
+                    "response_preview": str(response_text or "")[:240],
+                    "query": str(payload.get("query", "") or ""),
+                    "request_messages": payload.get("messages") if isinstance(payload, dict) else [],
+                    "request_messages_exact": request_messages,
+                    "request_messages_raw": request_messages_raw,
+                    "request_prompts_exact": request_prompts,
+                    "request_prompts_raw": request_prompts_raw,
+                    "invocation_params": invocation_params,
+                    "invocation_params_raw": invocation_params_raw,
+                    "memory_context": str(payload.get("memory_context", "") or "") if isinstance(payload, dict) else "",
+                    "context": payload.get("context") if isinstance(payload, dict) else {},
+                    "response": response,
+                    "response_raw": response_raw,
+                    "raw_input_line": input_row.get("raw") if input_row else "",
+                    "raw_output_line": text,
+                    "input_line_no": input_row.get("line") if input_row else None,
+                    "output_line_no": idx,
+                }
+            )
+
+        safe_limit = max(1, min(500, int(limit)))
+        return {
+            "items": list(reversed(exchanges[-safe_limit:])),
+            "total": len(exchanges),
+            "source_lines": len(lines),
+        }
 
     async def _do_restart(self) -> None:
         """Send restart command (systemd or SIGTERM) after a short delay."""
@@ -372,6 +549,7 @@ class WebUIServer:
                     mem_docs = sum(int(c.get("documents", 0) or 0) for c in corpora)
                 except Exception as e:
                     log("webui", "warning", f"Memory status unavailable: {e}")
+            processing = self._inflight_task_stats()
             return {
                 "service_state": self._service_state(),
                 "instance": self.config.get("instance", "aibt"),
@@ -382,6 +560,7 @@ class WebUIServer:
                     "corpora": mem_corpora,
                     "documents": mem_docs,
                 },
+                "processing": processing,
             }
 
         @app.get("/api/logs")
@@ -391,6 +570,22 @@ class WebUIServer:
         @app.get("/api/logs/types")
         async def api_log_types(session: dict = Depends(require)):
             return {"types": self._list_log_types()}
+
+        @app.get("/api/agent-logs/files")
+        async def api_agent_log_files(session: dict = Depends(require)):
+            return {"ok": True, "items": self._list_agent_llm_logs()}
+
+        @app.get("/api/agent-logs/view")
+        async def api_agent_log_view(file: str, limit: int = 120, session: dict = Depends(require)):
+            try:
+                path = self._resolve_agent_llm_log_path(file)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            try:
+                view = self._build_agent_log_view(path, limit=limit)
+                return {"ok": True, "file": path.name, **view}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
 
         @app.post("/api/service/restart")
         async def api_restart(session: dict = Depends(require)):

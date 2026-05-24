@@ -19,6 +19,9 @@ let _memoryDocSortBy = 'updated_at';
 let _memoryDocSortDir = 'desc';
 let _memoryFilterTimer = null;
 let _memoryNamespaceTimer = null;
+let _agentLogItems = [];
+let _agentLogSelectedId = '';
+let _agentLogRawVisible = false;
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -76,7 +79,8 @@ function showPage(name) {
   const page = document.getElementById('page-' + name);
   if (page) page.classList.add('active');
   document.querySelectorAll('.nav-tab').forEach(btn => {
-    if (btn.textContent.toLowerCase().trim() === name) btn.classList.add('active');
+    const click = String(btn.getAttribute('onclick') || '');
+    if (click.includes(`showPage('${name}')`)) btn.classList.add('active');
   });
   if (name === 'dashboard') {
     loadDashboard();
@@ -84,6 +88,9 @@ function showPage(name) {
   } else if (name === 'agent') {
     _closeWs();
     loadAgentPage();
+  } else if (name === 'agentlog') {
+    _closeWs();
+    loadAgentLogPage();
   } else if (name === 'memory') {
     _closeWs();
     loadMemoryPage();
@@ -92,6 +99,215 @@ function showPage(name) {
     loadLangGraphPage();
   } else {
     _closeWs();
+  }
+}
+
+// ── Agent log page ─────────────────────────────────────────────────────────
+
+async function loadAgentLogPage(force = false) {
+  const fileSel = document.getElementById('alog-file-select');
+  const meta = document.getElementById('alog-meta');
+  if (!fileSel) return;
+
+  try {
+    const files = await apiGet('/api/agent-logs/files');
+    const prev = fileSel.value;
+    fileSel.innerHTML = '';
+    (files.items || []).forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = String(name || '');
+      opt.textContent = String(name || '');
+      fileSel.appendChild(opt);
+    });
+
+    if (!fileSel.options.length) {
+      if (meta) meta.textContent = 'No *_llm.jsonl logs found in ./logs.';
+      _agentLogItems = [];
+      _agentLogSelectedId = '';
+      _renderAgentLogList();
+      _renderAgentLogDetail(null);
+      return;
+    }
+
+    if (prev && Array.from(fileSel.options).some(o => o.value === prev)) {
+      fileSel.value = prev;
+    }
+
+    if (force || document.getElementById('page-agentlog')?.classList.contains('active')) {
+      await onAgentLogFileChange();
+    }
+  } catch (e) {
+    if (meta) meta.textContent = 'Agent log files error: ' + (e.message || e);
+  }
+}
+
+async function onAgentLogFileChange() {
+  const fileSel = document.getElementById('alog-file-select');
+  const limitEl = document.getElementById('alog-limit');
+  const meta = document.getElementById('alog-meta');
+  if (!fileSel) return;
+
+  const file = String(fileSel.value || '').trim();
+  const rawLimit = Number(limitEl?.value || 120);
+  const limit = Number.isFinite(rawLimit) ? Math.max(10, Math.min(500, Math.trunc(rawLimit))) : 120;
+  if (limitEl) limitEl.value = String(limit);
+
+  if (!file) {
+    _agentLogItems = [];
+    _agentLogSelectedId = '';
+    _renderAgentLogList();
+    _renderAgentLogDetail(null);
+    if (meta) meta.textContent = 'Select agent log file.';
+    return;
+  }
+
+  try {
+    const data = await apiGet('/api/agent-logs/view?file=' + encodeURIComponent(file) + '&limit=' + encodeURIComponent(limit));
+    _agentLogItems = Array.isArray(data.items) ? data.items : [];
+    if (_agentLogItems.length) {
+      if (!_agentLogItems.some(i => i.entry_id === _agentLogSelectedId)) {
+        _agentLogSelectedId = String(_agentLogItems[0].entry_id || '');
+      }
+    } else {
+      _agentLogSelectedId = '';
+    }
+    if (meta) {
+      meta.textContent = `${data.file || file}: ${Number(data.total || 0)} entries, showing ${_agentLogItems.length}`;
+    }
+    _renderAgentLogList();
+    _renderAgentLogDetail(_getSelectedAgentLogItem());
+  } catch (e) {
+    if (meta) meta.textContent = 'Agent log view error: ' + (e.message || e);
+    _agentLogItems = [];
+    _agentLogSelectedId = '';
+    _renderAgentLogList();
+    _renderAgentLogDetail(null);
+  }
+}
+
+function _getSelectedAgentLogItem() {
+  return _agentLogItems.find(i => String(i.entry_id || '') === String(_agentLogSelectedId || '')) || null;
+}
+
+function _renderAgentLogList() {
+  const list = document.getElementById('alog-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (!_agentLogItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'alog-item';
+    empty.textContent = 'No entries.';
+    list.appendChild(empty);
+    return;
+  }
+
+  _agentLogItems.forEach((item) => {
+    const id = String(item.entry_id || '');
+    const row = document.createElement('div');
+    row.className = 'alog-item' + (id === _agentLogSelectedId ? ' active' : '');
+    row.onclick = () => {
+      _agentLogSelectedId = id;
+      _renderAgentLogList();
+      _renderAgentLogDetail(item);
+    };
+
+    const time = document.createElement('div');
+    time.className = 'alog-time';
+    time.textContent = item.time || '—';
+
+    const user = document.createElement('div');
+    user.className = 'alog-preview';
+    user.textContent = 'User: ' + String(item.user_preview || '').slice(0, 180);
+
+    const resp = document.createElement('div');
+    resp.className = 'alog-preview';
+    resp.textContent = 'Response: ' + String(item.response_preview || '').slice(0, 180);
+
+    row.appendChild(time);
+    row.appendChild(user);
+    row.appendChild(resp);
+    list.appendChild(row);
+  });
+}
+
+function _renderAgentLogDetail(item) {
+  const tech = document.getElementById('alog-tech');
+  const req = document.getElementById('alog-request');
+  const resp = document.getElementById('alog-response');
+  const raw = document.getElementById('alog-raw');
+  const rawWrap = document.getElementById('alog-raw-wrap');
+  if (!tech || !req || !resp || !raw || !rawWrap) return;
+
+  if (!item) {
+    tech.textContent = 'No entry selected.';
+    req.textContent = '';
+    resp.textContent = '';
+    raw.textContent = '';
+    rawWrap.style.display = _agentLogRawVisible ? '' : 'none';
+    return;
+  }
+
+  tech.innerHTML =
+    `<div><strong>time:</strong> ${escapeHtml(item.time || '—')}</div>` +
+    `<div><strong>agent:</strong> ${escapeHtml(item.agent_id || '—')}</div>` +
+    `<div><strong>envid:</strong> ${escapeHtml(item.envid == null ? '' : String(item.envid))}</div>` +
+    `<div><strong>entry:</strong> ${escapeHtml(item.entry_id || '—')}</div>` +
+    `<div><strong>input/output line:</strong> ${escapeHtml(String(item.input_line_no || '—'))} / ${escapeHtml(String(item.output_line_no || '—'))}</div>`;
+
+  const requestPayload = {
+    request_messages_exact: item.request_messages_exact ?? null,
+    request_messages_raw: item.request_messages_raw ?? null,
+    request_prompts_exact: item.request_prompts_exact ?? null,
+    request_prompts_raw: item.request_prompts_raw ?? null,
+    invocation_params: item.invocation_params ?? null,
+    invocation_params_raw: item.invocation_params_raw ?? null,
+    query: item.query || '',
+    messages_payload_fallback: item.request_messages || [],
+    memory_context: item.memory_context || '',
+    context: item.context || {},
+  };
+  req.textContent = JSON.stringify(requestPayload, null, 2);
+  const hasRaw = item.response_raw !== undefined && item.response_raw !== null;
+  if (hasRaw) {
+    resp.textContent = JSON.stringify({
+      response: item.response ?? null,
+      response_raw: item.response_raw,
+    }, null, 2);
+  } else {
+    resp.textContent = typeof item.response === 'string'
+      ? item.response
+      : JSON.stringify(item.response ?? null, null, 2);
+  }
+
+  const inputPretty = _tryPrettifyJson(item.raw_input_line);
+  const outputPretty = _tryPrettifyJson(item.raw_output_line);
+  raw.textContent =
+    'INPUT LINE\n' +
+    '----------\n' +
+    (inputPretty || '(empty)') +
+    '\n\n' +
+    'OUTPUT LINE\n' +
+    '-----------\n' +
+    (outputPretty || '(empty)');
+  rawWrap.style.display = _agentLogRawVisible ? '' : 'none';
+}
+
+function _tryPrettifyJson(text) {
+  const src = String(text || '').trim();
+  if (!src) return '';
+  try {
+    return JSON.stringify(JSON.parse(src), null, 2);
+  } catch (_) {
+    return src;
+  }
+}
+
+function toggleAgentLogRaw() {
+  _agentLogRawVisible = !_agentLogRawVisible;
+  const wrap = document.getElementById('alog-raw-wrap');
+  if (wrap) {
+    wrap.style.display = _agentLogRawVisible ? '' : 'none';
   }
 }
 
@@ -154,6 +370,16 @@ async function loadDashboard() {
         cardMemory.textContent = `${corpora} corpora / ${docs} docs`;
         cardMemory.className = 'card-value ok';
       }
+    }
+
+    const cardProcessing = document.getElementById('card-processing');
+    if (cardProcessing) {
+      const proc = s.processing || {};
+      const total = Number(proc.total || 0);
+      const running = Number(proc.running || 0);
+      const retrying = Number(proc.retrying || 0);
+      cardProcessing.textContent = `${total} (run:${running} retry:${retrying})`;
+      cardProcessing.className = 'card-value ' + (total > 0 ? 'warn' : 'ok');
     }
   } catch (_) {
     _updateServiceBadge('offline');
@@ -1110,6 +1336,7 @@ document.addEventListener('keydown', e => {
     showScreen('app');
     loadDashboard();
     loadAgentPage();
+    loadAgentLogPage();
     loadMemoryPage();
     setupLogPanel();
     _startStatusPoll();

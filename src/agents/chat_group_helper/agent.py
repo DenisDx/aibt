@@ -1,11 +1,15 @@
 """ChatGroupHelperAgent: non-intrusive helper for Telegram group chats."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 from typing import Any
 
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import MessagesPlaceholder
 from langchain_core.prompts import ChatPromptTemplate
 
 from agents.base import AgentBase
@@ -32,22 +36,26 @@ class ChatGroupHelperAgent(AgentBase):
                     f"{instruction_block}\n"
                     "Memory context:\n{memory_context}",
                 ),
-                ("human", "{query}"),
+                MessagesPlaceholder("messages"),
             ]
         )
         llm = build_llm(self.app_config)
         return self.prompt | llm
 
     async def handle(self, query: str, context=None) -> dict[str, Any]:
-        """Evaluate reply policy, optionally answer, and persist trace/profile updates."""
+        """Let LLM decide whether to reply and persist trace/profile updates."""
 
         ctx = context or {}
         envid = str(ctx.get("envid", "")).strip() or None
-        decision = self._decide_reply(query, ctx)
-        self._persist_decision_trace(query, ctx, decision, envid=envid)
-        self._update_participant_dossier(query, ctx, decision, envid=envid)
+        llm_messages = self._build_llm_messages(query, ctx)
+        llm_ctx = {**ctx, "messages": llm_messages}
+        result = await super().handle(query, context=llm_ctx)
+        text = str(result.get("result", "") or "").strip()
 
-        if decision["action"] == "ignore":
+        if self._is_no_reply_output(text):
+            decision = {"action": "ignore", "reason": "llm_no_reply", "unsolicited": False}
+            self._persist_decision_trace(query, ctx, decision, envid=envid)
+            self._update_participant_dossier(query, ctx, decision, envid=envid)
             self.memory_tools.record_episode(
                 agent_id=self.name,
                 text=f"decision=ignore reason={decision['reason']} chat_id={ctx.get('chat_id')} user_id={ctx.get('user_id')} message_id={ctx.get('message_id')}",
@@ -59,18 +67,83 @@ class ChatGroupHelperAgent(AgentBase):
                 "result": "",
                 "skip_send": True,
                 "decision": decision,
-                "memory": {
-                    "semantic_hits": 0,
-                    "doc_hits": 0,
-                    "summary_hit": False,
-                    "procedural_items": 0,
-                },
+                "memory": result.get("memory", {}),
             }
 
-        result = await super().handle(query, context=ctx)
-        self._mark_reply_usage(ctx, unsolicited=bool(decision.get("unsolicited", False)))
+        decision = {"action": "reply", "reason": "llm_reply", "unsolicited": False}
+        self._persist_decision_trace(query, ctx, decision, envid=envid)
+        self._update_participant_dossier(query, ctx, decision, envid=envid)
+        result["result"] = text
         result["decision"] = decision
         return result
+
+    @staticmethod
+    def _is_no_reply_output(text: str) -> bool:
+        """Return true when model explicitly decides to skip this turn."""
+
+        clean = str(text or "").strip()
+        return clean == "__NO_REPLY__" or clean == "" or clean.lower() in ("no reply", "no response", "skip", "none", "n/a", "no answer") or clean.lower() in ("timeout", "connection error.") or clean.lower().startswith("error:") or clean.endswith("__NO_REPLY__")
+
+    def _history_messages_limit(self) -> int:
+        """Return max number of recent chat messages to include into LLM input."""
+
+        cfg = self.agent_config if isinstance(self.agent_config, dict) else {}
+        raw = cfg.get("recent_messages_limit", cfg.get("send_last", 50)) if isinstance(cfg, dict) else 50
+        try:
+            return max(1, min(200, int(raw)))
+        except Exception:
+            return 50
+
+    def _build_llm_messages(self, query: str, ctx: dict[str, Any]) -> list[Any]:
+        """Build model input from recent history preserving user/assistant roles."""
+
+        recent = ctx.get("recent_messages", [])
+        items: list[dict[str, Any]] = []
+        if isinstance(recent, list):
+            limit = self._history_messages_limit()
+            items = [x for x in recent[-limit:] if isinstance(x, dict)]
+
+        if not items:
+            items = [
+                {
+                    "role": "user",
+                    "message_id": ctx.get("message_id", ""),
+                    "user_id": ctx.get("user_id", "unknown"),
+                    "display_name": ctx.get("display_name", ""),
+                    "username": ctx.get("username", ""),
+                    "text": query,
+                }
+            ]
+
+        out: list[Any] = []
+        for item in items:
+            text = str(item.get("text", "") or "").strip()
+            if not text:
+                continue
+            role = str(item.get("role", "user") or "user").strip().lower()
+            message_id = str(item.get("message_id", "") or "").strip()
+            user_id = str(item.get("user_id", "") or "unknown")
+            name = str(item.get("display_name", "") or item.get("username", "") or f"user_{user_id}").strip()
+            username = str(item.get("username", "") or "").strip().lstrip("@")
+            payload = json.dumps(
+                {
+                    "message_id": message_id,
+                    "user_id": user_id,
+                    "name": name,
+                    "username": username,
+                    "text": text,
+                },
+                ensure_ascii=False,
+            )
+            if role == "assistant":
+                out.append(AIMessage(content=payload))
+            else:
+                out.append(
+                    HumanMessage(
+                        content=payload
+                    )
+                )
+        return out or [HumanMessage(content=query)]
 
     def _reply_policy(self) -> dict[str, Any]:
         """Return normalized reply policy from config with defaults."""

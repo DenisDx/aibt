@@ -5,6 +5,8 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from core.llm_wiretap import get_async_http_client
+
 
 def _first_model_id(provider_cfg: dict[str, Any]) -> str | None:
     models = provider_cfg.get("models", [])
@@ -46,4 +48,5 @@ def build_llm(config: dict[str, Any]) -> ChatOpenAI:
         api_key=api_key,
         base_url=base_url,
         temperature=0,
+        http_async_client=get_async_http_client(),
     )

@@ -5,6 +5,7 @@ Handles incoming messages from Telegram users and routes them to agents via orch
 import asyncio
 from collections import defaultdict
 import json
+import re
 import traceback
 from typing import Any
 from adapters.adapter import Adapter
@@ -75,6 +76,7 @@ class TelegramAdapter(Adapter):
         self.default_agent = str(cfg.get("default_agent", "chat_group_helper"))
         self.polling = bool(cfg.get("polling", True))
         self.polling_timeout = int(cfg.get("polling_timeout", 30))
+        self.timeout_seconds = max(1, int(cfg.get("timeoutSeconds", 100)))
         self.listen_private = bool(cfg.get("listen_private", True))
         self.listen_groups = bool(cfg.get("listen_groups", True))
         self.show_typing = bool(cfg.get("show_typing", False))
@@ -131,14 +133,53 @@ class TelegramAdapter(Adapter):
         bucket = self._recent_group_messages[chat_id]
         bucket.append(
             {
+                "role": "user",
                 "message_id": getattr(msg, "message_id", None),
                 "date": str(getattr(msg, "date", "") or ""),
                 "user_id": getattr(user, "id", None),
+                "display_name": self._display_name(user),
                 "username": getattr(user, "username", None),
                 "text": text,
             }
         )
         self._recent_group_messages[chat_id] = bucket[-80:]
+
+    def _remember_recent_assistant_message(self, chat_id: int, text: str) -> None:
+        """Cache bot outgoing message in recent history as assistant role."""
+
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return
+        bucket = self._recent_group_messages[str(chat_id)]
+        username = sorted(self._bot_usernames)[0] if self._bot_usernames else ""
+        display_name = f"@{username}" if username else "assistant"
+        bucket.append(
+            {
+                "role": "assistant",
+                "message_id": None,
+                "date": "",
+                "user_id": None,
+                "display_name": display_name,
+                "username": username or None,
+                "text": clean_text,
+            }
+        )
+        self._recent_group_messages[str(chat_id)] = bucket[-80:]
+
+    @staticmethod
+    def _display_name(user: Any) -> str:
+        """Build compact user display name from Telegram user fields."""
+
+        first = str(getattr(user, "first_name", "") or "").strip()
+        last = str(getattr(user, "last_name", "") or "").strip()
+        full = " ".join(part for part in (first, last) if part).strip()
+        if full:
+            return full
+        username = str(getattr(user, "username", "") or "").strip()
+        if username:
+            return f"@{username}"
+        user_id = getattr(user, "id", None)
+        return f"user_{user_id}" if user_id is not None else "unknown"
 
     def _resolve_envid_for_chat(self, chat: Any) -> str | None:
         """Resolve envid for one chat descriptor with Telegram matching fields."""
@@ -293,6 +334,22 @@ class TelegramAdapter(Adapter):
             line = str(payload)
         log(self.dialog_log_type, "info", line)
 
+    @staticmethod
+    def _extract_reply_marker(text: str) -> tuple[str, int | None]:
+        """Extract __REPLY__:<message_id> marker from model text.
+
+        Input: raw model output text.
+        Output: cleaned text and optional reply target message id.
+        """
+
+        raw = str(text or "")
+        match = re.search(r"__REPLY__\s*:\s*(\d+)", raw)
+        if not match:
+            return raw, None
+        reply_to = int(match.group(1))
+        cleaned = (raw[: match.start()] + raw[match.end() :]).strip()
+        return cleaned, reply_to
+
 
     async def handle(self, user_id: str, agent_id: str, message: str, context: dict = None) -> dict:
         """
@@ -321,6 +378,7 @@ class TelegramAdapter(Adapter):
         runtime_cfg = self.assemble_runtime_config(envid=envid)
         runtime_enabled = bool(runtime_cfg.get("enabled", self.enabled))
         default_agent = str(runtime_cfg.get("default_agent", self.default_agent) or self.default_agent)
+        timeout_seconds = max(1, int(runtime_cfg.get("timeoutSeconds", self.timeout_seconds)))
 
         if not runtime_enabled or not self.bot:
             log("adapters.telegram", "debug", "adapter disabled or bot not ready")
@@ -350,7 +408,9 @@ class TelegramAdapter(Adapter):
             await self.send_typing_action(chat_id)
         
         # Wait for completion (polling, since orchestrator is in-memory)
-        for attempt in range(120):  # up to 60s
+        poll_interval = 0.5
+        max_attempts = max(1, int(timeout_seconds / poll_interval))
+        for attempt in range(max_attempts):
             task = self.orchestrator.get_task(task_id)
             if task and task.get("status") in ("done", "error"):
                 result = task.get("result") or {"error": "no result"}
@@ -358,13 +418,13 @@ class TelegramAdapter(Adapter):
                 log("adapters.telegram", "info", f"task completed ({status}): {result.get('error') or result.get('result', 'ok')[:50]}")
                 return result
             # Re-send typing indicator every 5 seconds
-            if attempt > 0 and attempt % 10 == 0:
+            if attempt > 0 and attempt % int(5 / poll_interval) == 0:
                 if self.show_typing:
                     await self.send_typing_action(chat_id)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(poll_interval)
 
-        log("adapters.telegram", "error", f"task timeout after 60s: {task_id}")
-        return {"error": "timeout"}
+        log("adapters.telegram", "warning", f"task timeout after {timeout_seconds}s: {task_id}")
+        return {"skip_send": True, "skip_reason": "timeout"}
 
     async def send_typing_action(self, chat_id: int) -> bool:
         """
@@ -385,12 +445,13 @@ class TelegramAdapter(Adapter):
             log("adapters.telegram", "debug", f"failed to send typing indicator to chat {chat_id}: {e}")
             return False
 
-    async def send_message(self, chat_id: int, text: str) -> bool:
+    async def send_message(self, chat_id: int, text: str, reply_to_message_id: int | None = None) -> bool:
         """
         Send a message via Telegram Bot API.
         Args:
             chat_id: Telegram chat_id
             text: Message text
+            reply_to_message_id: Optional Telegram message id to send as reply
         Returns:
             True if sent successfully, False otherwise
         """
@@ -401,10 +462,27 @@ class TelegramAdapter(Adapter):
         try:
             truncated_text = text[:100] + ('...' if len(text) > 100 else '')
             log("adapters.telegram", "debug", f"sending message to chat {chat_id}: '{truncated_text}'")
-            await self.bot.send_message(chat_id=chat_id, text=text)
+            kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
+            if reply_to_message_id is not None:
+                kwargs["reply_to_message_id"] = int(reply_to_message_id)
+            await self.bot.send_message(**kwargs)
             log("adapters.telegram", "info", f"message sent to chat {chat_id}")
             return True
         except Exception as e:
+            err_text = str(e)
+            # Fallback: if reply target no longer exists, send same message without reply target.
+            if reply_to_message_id is not None and "Message to be replied not found" in err_text:
+                log(
+                    "adapters.telegram",
+                    "warning",
+                    f"reply target not found for chat {chat_id} reply_to={reply_to_message_id}; retrying without reply_to_message_id",
+                )
+                try:
+                    await self.bot.send_message(chat_id=chat_id, text=text)
+                    log("adapters.telegram", "info", f"message sent to chat {chat_id} (fallback without reply target)")
+                    return True
+                except Exception as retry_e:
+                    log("adapters.telegram", "error", f"fallback send failed for chat {chat_id}: {retry_e}")
             log("adapters.telegram", "error", f"failed to send message to chat {chat_id}: {e}")
             return False
 
@@ -533,6 +611,7 @@ class TelegramAdapter(Adapter):
         
         try:
             # Route message through adapter
+            recent_messages = list(self._recent_group_messages.get(str(chat_id), []))
             result = await self.handle(
                 str(chat_id),
                 "",
@@ -545,8 +624,10 @@ class TelegramAdapter(Adapter):
                     "message_id": getattr(update.message, "message_id", None),
                     "user_id": getattr(update.effective_user, "id", None),
                     "username": getattr(update.effective_user, "username", ""),
+                    "display_name": self._display_name(update.effective_user),
                     "mentioned": mentioned,
                     "direct_address": direct_address,
+                    "recent_messages": recent_messages,
                 },
             )
 
@@ -556,7 +637,7 @@ class TelegramAdapter(Adapter):
                     incoming_text=text,
                     response_text=None,
                     response_sent=False,
-                    error="ignored_by_policy",
+                    error=str(result.get("skip_reason", "ignored_by_model_decision")),
                 )
                 return
             
@@ -564,9 +645,14 @@ class TelegramAdapter(Adapter):
             response_text = result.get("result") or result.get("error") or "No response"
             if isinstance(response_text, dict):
                 response_text = str(response_text)
+            response_text, reply_to_message_id = self._extract_reply_marker(str(response_text))
+            if not str(response_text).strip():
+                response_text = "No response"
             
             log("adapters.telegram", "debug", f"sending response to user {username}")
-            sent = await self.send_message(chat_id, str(response_text))
+            sent = await self.send_message(chat_id, str(response_text), reply_to_message_id=reply_to_message_id)
+            if sent:
+                self._remember_recent_assistant_message(chat_id, str(response_text))
             self._log_dialog_event(
                 update=update,
                 incoming_text=text,

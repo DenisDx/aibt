@@ -108,10 +108,22 @@
     .chat-form { border-top: 1px solid var(--border); padding: 10px; display: flex; gap: 8px; }
     .chat-form input { flex: 1; min-width: 120px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; }
 
+    /* ── Agent log page ───────────────────────────────────── */
+    .alog-layout { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 12px; }
+    .alog-list { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: auto; min-height: 420px; max-height: calc(100vh - 240px); }
+    .alog-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+    .alog-item:hover { background: rgba(255,255,255,.03); }
+    .alog-item.active { background: rgba(91,138,247,.12); border-left: 3px solid var(--accent); padding-left: 9px; }
+    .alog-time { font-size: 11px; color: var(--muted); }
+    .alog-preview { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .alog-detail { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 420px; }
+    .alog-block { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--bg); min-height: 140px; overflow: auto; resize: vertical; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+
     @media (max-width: 900px) {
       .agent-layout { grid-template-columns: 1fr; }
       .chat-card { min-height: 360px; }
       .chat-msg { max-width: 95%; }
+      .alog-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -140,6 +152,7 @@
     <span class="nav-brand">aibt</span>
     <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="showPage('agent')">Agent</button>
+    <button class="nav-tab" onclick="showPage('agentlog')">Agent Log</button>
     <button class="nav-tab" onclick="showPage('memory')">Memory</button>
     <button class="nav-tab" onclick="showPage('langgraph')">LangGraph</button>
     <button class="nav-tab" onclick="showPage('settings')" title="Coming in a future phase">Settings</button>
@@ -177,6 +190,10 @@
           <div class="card-label">Memory</div>
           <div class="card-value muted" id="card-memory">N/A</div>
         </div>
+        <div class="status-card">
+          <div class="card-label">In Processing</div>
+          <div class="card-value muted" id="card-processing">0</div>
+        </div>
       </div>
 
       <div class="log-panel">
@@ -210,6 +227,44 @@
             <input id="agent-chat-input" type="text" placeholder="Type your message to selected agent..." autocomplete="off">
             <button class="btn" type="submit">Send</button>
           </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent Log page -->
+    <div id="page-agentlog" class="page">
+      <div class="agent-card" style="gap:8px;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <label for="alog-file-select">Agent log file</label>
+          <select id="alog-file-select" onchange="onAgentLogFileChange()" style="min-width:280px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);"></select>
+          <label for="alog-limit">Last entries</label>
+          <input id="alog-limit" type="number" min="10" max="500" value="120" style="width:90px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <button class="btn" onclick="loadAgentLogPage(true)">Refresh</button>
+          <span id="alog-meta" class="nav-whoami"></span>
+        </div>
+      </div>
+
+      <div class="alog-layout">
+        <div id="alog-list" class="alog-list"></div>
+        <div class="alog-detail">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <div class="card-label">Entry details</div>
+            <span class="nav-spacer"></span>
+            <button class="btn" onclick="toggleAgentLogRaw()">Show/Hide Prettified Row</button>
+          </div>
+          <div class="agent-meta" id="alog-tech">No entry selected.</div>
+          <div>
+            <div class="card-label" style="margin-bottom:6px;">Full request</div>
+            <pre id="alog-request" class="alog-block"></pre>
+          </div>
+          <div>
+            <div class="card-label" style="margin-bottom:6px;">Full response</div>
+            <pre id="alog-response" class="alog-block"></pre>
+          </div>
+          <div id="alog-raw-wrap" style="display:none;">
+            <div class="card-label" style="margin-bottom:6px;">Raw row prettified</div>
+            <pre id="alog-raw" class="alog-block"></pre>
+          </div>
         </div>
       </div>
     </div>

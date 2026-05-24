@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import json
 import os
 from typing import Any
-from datetime import datetime, timezone
 
 from core.envid_runtime import assemble_component_config
+from core.llm_wiretap import pop_llm_log_context
+from core.llm_wiretap import push_llm_log_context
 from core.logging_utils import log
 from memory.tools import MemoryTools
 
@@ -89,10 +89,28 @@ class AgentBase(ABC):
             "context": ctx,
             "memory_context": memory_context,
         }
-        self._maybe_log_llm_input(payload, envid=envid)
-        out = await self.chain.ainvoke(payload)
+        if "messages" in ctx:
+            payload["messages"] = ctx.get("messages")
+        invoke_config = None
+        log_token = None
+        if self._llm_logging_enabled():
+            payload_preview = {
+                "query": query,
+                "context": ctx,
+                "memory_context": memory_context,
+            }
+            log_token = push_llm_log_context(
+                agent_id=self.name,
+                envid=envid,
+                log_path=self._llm_log_path(),
+                payload=payload_preview,
+            )
+        try:
+            out = await self.chain.ainvoke(payload, config=invoke_config)
+        finally:
+            if log_token is not None:
+                pop_llm_log_context(log_token)
         content = getattr(out, "content", out)
-        self._maybe_log_llm_output(payload, content, envid=envid)
 
         try:
             self.memory_tools.record_episode(
@@ -131,72 +149,6 @@ class AgentBase(ABC):
         logs_dir = os.path.join(root_dir, "logs")
         os.makedirs(logs_dir, exist_ok=True)
         return os.path.join(logs_dir, f"{self.name}_llm.jsonl")
-
-    def _maybe_log_llm_input(self, payload: dict[str, Any], envid: str | None = None) -> None:
-        """Persist the outgoing prompt payload before LLM invocation when enabled."""
-
-        if not self._llm_logging_enabled():
-            return
-        rendered_messages = self._render_llm_messages(payload)
-        entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "phase": "input",
-            "agent_id": self.name,
-            "envid": envid,
-            "payload": payload,
-        }
-        if rendered_messages:
-            entry["messages"] = rendered_messages
-        self._append_llm_log(
-            entry
-        )
-
-    def _maybe_log_llm_output(self, payload: dict[str, Any], content: Any, envid: str | None = None) -> None:
-        """Persist the LLM response after invocation when enabled."""
-
-        if not self._llm_logging_enabled():
-            return
-        self._append_llm_log(
-            {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "phase": "output",
-                "agent_id": self.name,
-                "envid": envid,
-                "payload": payload,
-                "response": content,
-            }
-        )
-
-    def _append_llm_log(self, entry: dict[str, Any]) -> None:
-        """Append one JSONL record for LLM exchange logging."""
-
-        try:
-            with open(self._llm_log_path(), "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-        except Exception as e:
-            log("agents", "warning", f"Failed to write LLM log for agent={self.name}: {e}")
-
-    def _render_llm_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        """Render concrete prompt messages for logging when the agent exposes a prompt template."""
-
-        prompt = getattr(self, "prompt", None)
-        if prompt is None or not hasattr(prompt, "format_messages"):
-            return []
-        try:
-            messages = prompt.format_messages(**payload)
-        except Exception as e:
-            log("agents", "warning", f"Failed to render LLM messages for agent={self.name}: {e}")
-            return []
-
-        rendered: list[dict[str, Any]] = []
-        for message in messages:
-            rendered.append(
-                {
-                    "type": getattr(message, "type", message.__class__.__name__),
-                    "content": getattr(message, "content", str(message)),
-                }
-            )
-        return rendered
 
     def _allowed_corpora(self) -> list[str] | None:
         """Resolve allowed corpora for this agent.
