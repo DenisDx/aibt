@@ -81,6 +81,38 @@ class TelegramAdapter(Adapter):
         self.listen_groups = bool(cfg.get("listen_groups", True))
         self.show_typing = bool(cfg.get("show_typing", False))
         self.dialog_log_type = str(cfg.get("dialog_log_type", "telegram_dialog"))
+        self._allow_groups_list_specified = "allow_groups_list" in cfg
+        self._allow_users_list_specified = "allow_users_list" in cfg
+        self.allow_groups_list = self._normalize_allow_ids(cfg.get("allow_groups_list"))
+        self.allow_users_list = self._normalize_allow_users(cfg.get("allow_users_list"))
+
+    @staticmethod
+    def _normalize_allow_ids(raw: Any) -> set[str]:
+        """Normalize allow-list ids to a string set."""
+
+        if not isinstance(raw, list):
+            return set()
+        out: set[str] = set()
+        for item in raw:
+            text = str(item).strip()
+            if text:
+                out.add(text)
+        return out
+
+    @staticmethod
+    def _normalize_allow_users(raw: Any) -> set[str]:
+        """Normalize allow-list users (id or username) to lowercase string set."""
+
+        if not isinstance(raw, list):
+            return set()
+        out: set[str] = set()
+        for item in raw:
+            text = str(item).strip().lower()
+            if not text:
+                continue
+            out.add(text)
+            out.add(text.lstrip("@"))
+        return out
 
     def _message_mentions_bot(self, update: "Update") -> bool:
         """Return true when the message explicitly mentions this bot username."""
@@ -283,12 +315,42 @@ class TelegramAdapter(Adapter):
     def _is_chat_allowed(self, update: "Update") -> bool:
         """Check if incoming chat type is enabled in Telegram adapter settings."""
         chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
         chat_type = getattr(chat, "type", "unknown")
+        chat_id = str(getattr(chat, "id", "") or "").strip()
+        user_id = str(getattr(user, "id", "") or "").strip().lower()
+        username = str(getattr(user, "username", "") or "").strip().lower().lstrip("@")
+
         if chat_type == "private":
-            return self.listen_private
-        if chat_type in ("group", "supergroup"):
-            return self.listen_groups
-        return False
+            allowed_by_type = self.listen_private
+        elif chat_type in ("group", "supergroup"):
+            allowed_by_type = self.listen_groups
+        else:
+            allowed_by_type = False
+
+        if not allowed_by_type:
+            return False
+
+        if chat_type in ("group", "supergroup") and self._allow_groups_list_specified:
+            if chat_id not in self.allow_groups_list:
+                log(
+                    "adapters.telegram",
+                    "warning",
+                    f"telegram access denied for group chat_id={chat_id}; add this id to adapters.items.{self.adapter_id}.allow_groups_list to allow access",
+                )
+                return False
+
+        if self._allow_users_list_specified:
+            candidates = {x for x in (user_id, username, f"@{username}" if username else "") if x}
+            if not candidates or not any(candidate in self.allow_users_list for candidate in candidates):
+                log(
+                    "adapters.telegram",
+                    "warning",
+                    f"telegram access denied for user_id={user_id or '-'} username={('@' + username) if username else '-'}; add this user to adapters.items.{self.adapter_id}.allow_users_list to allow access",
+                )
+                return False
+
+        return True
 
     def _chat_name(self, update: "Update") -> str:
         """Return best-effort chat title/identifier for logging."""

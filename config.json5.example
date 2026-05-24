@@ -183,6 +183,8 @@
         "timeoutSeconds": 100,  // Max wait for one agent task before silent skip
         "listen_private": true,  // Listen to private chats
         "listen_groups": true,  // Listen to groups/supergroups where bot is added
+        // "allow_groups_list": [-1001234567890],  // Optional adapter ACL: when set, only listed group chat_ids are allowed; [] blocks all groups
+        // "allow_users_list": [123456789, "allowed_username"],  // Optional adapter ACL: when set, only listed sender user ids/usernames are allowed
         "dialog_log_type": "telegram_dialog",  // Dedicated file logs/<dialog_log_type>.log with input+reaction pairs
         // Example with graph_echo agent:
         // "enabled": true,
@@ -192,6 +194,8 @@
         // "polling_timeout": 30,
         // "listen_private": true,
         // "listen_groups": true,
+        // "allow_groups_list": [-1001234567890],
+        // "allow_users_list": [123456789, "allowed_username"],
         // "dialog_log_type": "telegram_dialog",
       },
       "cron": {
