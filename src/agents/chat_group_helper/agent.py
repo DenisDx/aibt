@@ -50,7 +50,7 @@ class ChatGroupHelperAgent(AgentBase):
         llm_messages = self._build_llm_messages(query, ctx)
         llm_ctx = {**ctx, "messages": llm_messages}
         result = await super().handle(query, context=llm_ctx)
-        text = str(result.get("result", "") or "").strip()
+        text = self._extract_reply_text(result.get("result", ""))
 
         if self._is_no_reply_output(text):
             decision = {"action": "ignore", "reason": "llm_no_reply", "unsolicited": False}
@@ -76,6 +76,44 @@ class ChatGroupHelperAgent(AgentBase):
         result["result"] = text
         result["decision"] = decision
         return result
+
+    @staticmethod
+    def _extract_reply_text(raw_result: Any) -> str:
+        """Normalize model reply text.
+
+        Input: raw chain result (usually string content).
+        Output: plain text for Telegram send path.
+
+        If the reply is a JSON object encoded as string, tries to extract
+        one of: text, message, content.
+        """
+
+        text = str(raw_result or "").strip()
+        if not text:
+            return ""
+
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return text
+
+        if not isinstance(parsed, dict):
+            return text
+
+        for key in ("text", "message", "content"):
+            value = parsed.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                clean = value.strip()
+                if clean:
+                    return clean
+                continue
+            clean = str(value).strip()
+            if clean:
+                return clean
+
+        return text
 
     @staticmethod
     def _is_no_reply_output(text: str) -> bool:

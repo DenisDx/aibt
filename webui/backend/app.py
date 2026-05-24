@@ -350,6 +350,61 @@ class WebUIServer:
         return path
 
     @staticmethod
+    def _extract_text_field(value: Any) -> str:
+        """Extract human-readable text from plain/JSON-like payloads."""
+
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            src = value.strip()
+            if not src:
+                return ""
+            try:
+                parsed = json.loads(src)
+            except Exception:
+                return src
+            return WebUIServer._extract_text_field(parsed) or src
+
+        if isinstance(value, dict):
+            for key in ("text", "message", "content"):
+                if key not in value:
+                    continue
+                part = WebUIServer._extract_text_field(value.get(key))
+                if part:
+                    return part
+
+            # OpenAI-style response payloads.
+            choices = value.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0] if isinstance(choices[0], dict) else {}
+                msg = first.get("message") if isinstance(first, dict) else None
+                delta = first.get("delta") if isinstance(first, dict) else None
+                part = WebUIServer._extract_text_field(msg)
+                if part:
+                    return part
+                part = WebUIServer._extract_text_field(delta)
+                if part:
+                    return part
+
+            err = value.get("error")
+            if isinstance(err, dict):
+                part = WebUIServer._extract_text_field(err.get("message"))
+                if part:
+                    return part
+            return ""
+
+        if isinstance(value, list):
+            out: list[str] = []
+            for item in value:
+                part = WebUIServer._extract_text_field(item)
+                if part:
+                    out.append(part)
+            return " ".join(out).strip()
+
+        return str(value).strip()
+
+    @staticmethod
     def _extract_last_user_preview(payload: dict[str, Any], request_messages: Any = None) -> str:
         """Extract last user message preview from exact request or payload fallback."""
 
@@ -365,7 +420,9 @@ class WebUIServer:
                     continue
                 m_type = str(item.get("type", "") or item.get("role", "")).strip().lower()
                 if m_type in ("human", "user"):
-                    return str(item.get("content", "") or "")[:240]
+                    preview = WebUIServer._extract_text_field(item.get("content", ""))
+                    if preview:
+                        return preview[:240]
 
         if not isinstance(payload, dict):
             return ""
@@ -376,12 +433,32 @@ class WebUIServer:
                     continue
                 m_type = str(item.get("type", "") or "").strip().lower()
                 if m_type in ("human", "user"):
-                    return str(item.get("content", "") or "")[:240]
+                    preview = WebUIServer._extract_text_field(item.get("content", ""))
+                    if preview:
+                        return preview[:240]
             if messages:
                 tail = messages[-1]
                 if isinstance(tail, dict):
-                    return str(tail.get("content", "") or "")[:240]
-        return str(payload.get("query", "") or "")[:240]
+                    preview = WebUIServer._extract_text_field(tail.get("content", ""))
+                    if preview:
+                        return preview[:240]
+        return WebUIServer._extract_text_field(payload.get("query", ""))[:240]
+
+    @staticmethod
+    def _extract_response_preview(response: Any, response_raw: Any) -> str:
+        """Extract assistant response preview with JSON unpacking."""
+
+        text = WebUIServer._extract_text_field(response)
+        if text:
+            return text[:240]
+        text = WebUIServer._extract_text_field(response_raw)
+        if text:
+            return text[:240]
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response[:240]
+        return json.dumps(response, ensure_ascii=False, default=str)[:240]
 
     @staticmethod
     def _build_agent_log_view(path: Path, limit: int) -> dict[str, Any]:
@@ -446,8 +523,6 @@ class WebUIServer:
             response_raw = row.get("response_raw") if isinstance(row, dict) else None
             if response_raw is None:
                 response_raw = text
-            preview_source = response if response is not None else response_raw
-            response_text = preview_source if isinstance(preview_source, str) else json.dumps(preview_source, ensure_ascii=False, default=str)
             exchanges.append(
                 {
                     "entry_id": f"{path.name}:{idx}",
@@ -455,7 +530,7 @@ class WebUIServer:
                     "agent_id": str(row.get("agent_id") or (input_row or {}).get("data", {}).get("agent_id") or ""),
                     "envid": row.get("envid") if isinstance(row, dict) and row.get("envid") is not None else (input_row or {}).get("data", {}).get("envid"),
                     "user_preview": WebUIServer._extract_last_user_preview(payload, request_messages=request_messages),
-                    "response_preview": str(response_text or "")[:240],
+                    "response_preview": WebUIServer._extract_response_preview(response, response_raw),
                     "query": str(payload.get("query", "") or ""),
                     "request_messages": payload.get("messages") if isinstance(payload, dict) else [],
                     "request_messages_exact": request_messages,

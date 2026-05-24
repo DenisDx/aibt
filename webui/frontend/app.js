@@ -218,11 +218,11 @@ function _renderAgentLogList() {
 
     const user = document.createElement('div');
     user.className = 'alog-preview';
-    user.textContent = 'User: ' + String(item.user_preview || '').slice(0, 180);
+    user.textContent = 'role:user  ' + String(item.user_preview || '').slice(0, 180);
 
     const resp = document.createElement('div');
     resp.className = 'alog-preview';
-    resp.textContent = 'Response: ' + String(item.response_preview || '').slice(0, 180);
+    resp.textContent = 'role:assistant  ' + String(item.response_preview || '').slice(0, 180);
 
     row.appendChild(time);
     row.appendChild(user);
