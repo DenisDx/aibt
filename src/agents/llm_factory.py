@@ -17,12 +17,12 @@ def _first_model_id(provider_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def build_llm(config: dict[str, Any]) -> ChatOpenAI:
-    """Build ChatOpenAI using active provider/model from config."""
+def build_llm(config: dict[str, Any], provider: str | None = None, model: str | None = None) -> ChatOpenAI:
+    """Build ChatOpenAI using active or explicitly overridden provider/model."""
     models_cfg = config.get("models", {}) if isinstance(config, dict) else {}
     providers = models_cfg.get("providers", {}) if isinstance(models_cfg, dict) else {}
 
-    active_provider = str(models_cfg.get("active_provider", "")).strip()
+    active_provider = str(provider or "").strip() or str(models_cfg.get("active_provider", "")).strip()
     if not active_provider and isinstance(providers, dict) and providers:
         active_provider = next(iter(providers.keys()))
 
@@ -35,7 +35,8 @@ def build_llm(config: dict[str, Any]) -> ChatOpenAI:
         str(provider_cfg.get("apiKey", "")).strip()
     )
     model = (
-        str(models_cfg.get("active_model", "")).strip()
+        str(model or "").strip()
+        or str(models_cfg.get("active_model", "")).strip()
         or _first_model_id(provider_cfg)
         or "gpt-4o-mini"
     )

@@ -345,6 +345,39 @@ class AgentOrchestrator:
         text = str(exc).strip()
         return text or "unknown error"
 
+    @classmethod
+    def _classify_runtime_error(cls, exc: Exception | str | None) -> tuple[str, str, bool]:
+        """Classify runtime errors for concise logging and user-facing status.
+
+        Output: (error_code, public_message, expected_operational_error).
+        """
+
+        raw = cls._error_text(exc)
+        lowered = raw.lower()
+
+        if "timeout_error" in lowered or "request timed out" in lowered or "timed out" in lowered:
+            return (
+                "llm_timeout",
+                "LLM timeout: provider is overloaded or too slow; try again later.",
+                True,
+            )
+
+        if "apiconnectionerror" in lowered or "connection error" in lowered or "connection refused" in lowered:
+            return (
+                "llm_connection",
+                "LLM connection error: provider is unavailable; try again later.",
+                True,
+            )
+
+        if "rate limit" in lowered or "429" in lowered:
+            return (
+                "llm_rate_limit",
+                "LLM rate limit: too many requests; try again later.",
+                True,
+            )
+
+        return ("runtime_error", raw, False)
+
     async def _node_route(self, state: OrchestratorState) -> OrchestratorState:
         """Validate requested agent and mark task as running."""
         task_id = state["task_id"]
@@ -382,21 +415,34 @@ class AgentOrchestrator:
             retries = int(state.get("retries", 0))
             max_retries = int(state.get("max_retries", 1))
             fallback_agent = str(state.get("fallback_agent", "")).strip()
-            err_text = self._error_text(e)
-            log(
-                "core",
-                "error",
-                f"Task {task_id} failed in agent={agent_name} on retry={retries}: {e}\n{traceback.format_exc()}",
-                tag="orchestrator",
+            err_code, err_text, expected = self._classify_runtime_error(e)
+            if expected:
+                log(
+                    "core",
+                    "warning",
+                    f"Task {task_id} failed in agent={agent_name} on retry={retries}: {err_code} ({err_text})",
+                    tag="orchestrator",
+                )
+            else:
+                log(
+                    "core",
+                    "error",
+                    f"Task {task_id} failed in agent={agent_name} on retry={retries}: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
+
+            self._set_task(
+                task_id,
+                status="retrying",
+                result={"error": err_text, "error_code": err_code, "retries": retries},
             )
-            self._set_task(task_id, status="retrying", result={"error": err_text, "retries": retries})
 
             if retries < max_retries:
                 return {"status": "retry", "error": err_text}
             if fallback_agent and fallback_agent in self.agents and fallback_agent != agent_name:
                 return {"status": "fallback", "error": err_text}
 
-            self._set_task(task_id, status="error", result={"error": err_text})
+            self._set_task(task_id, status="error", result={"error": err_text, "error_code": err_code})
             return {"status": "error", "error": err_text}
 
     def _after_execute(self, state: OrchestratorState) -> str:
@@ -435,14 +481,22 @@ class AgentOrchestrator:
             self._set_task(task_id, status="done", result={"via_fallback": fallback_agent, **result})
             return {"status": "done", "result": {"via_fallback": fallback_agent, **result}}
         except Exception as e:
-            err_text = self._error_text(e)
-            log(
-                "core",
-                "error",
-                f"Task {task_id} fallback agent={fallback_agent} failed: {e}\n{traceback.format_exc()}",
-                tag="orchestrator",
-            )
-            self._set_task(task_id, status="error", result={"error": err_text})
+            err_code, err_text, expected = self._classify_runtime_error(e)
+            if expected:
+                log(
+                    "core",
+                    "warning",
+                    f"Task {task_id} fallback agent={fallback_agent} failed: {err_code} ({err_text})",
+                    tag="orchestrator",
+                )
+            else:
+                log(
+                    "core",
+                    "error",
+                    f"Task {task_id} fallback agent={fallback_agent} failed: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
+            self._set_task(task_id, status="error", result={"error": err_text, "error_code": err_code})
             return {"status": "error", "error": err_text}
 
     def _after_fallback(self, state: OrchestratorState) -> str:

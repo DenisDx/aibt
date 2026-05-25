@@ -213,18 +213,37 @@ class TelegramAdapter(Adapter):
         user_id = getattr(user, "id", None)
         return f"user_{user_id}" if user_id is not None else "unknown"
 
-    def _resolve_envid_for_chat(self, chat: Any) -> str | None:
+    def _resolve_envid_for_chat(self, chat: Any, user: Any = None) -> str | None:
         """Resolve envid for one chat descriptor with Telegram matching fields."""
 
+        chat_id = str(getattr(chat, "id", "") or "-")
+        sender_user_id = str(getattr(user, "id", "") or "-")
         event_ctx = {
             "chat_id": getattr(chat, "id", None),
             "chat_username": getattr(chat, "username", ""),
             "chat_type": getattr(chat, "type", ""),
         }
         try:
-            return self.resolve_envid(event_ctx, explicit_envid=None)
+            envid = self.resolve_envid(event_ctx, explicit_envid=None)
+            if envid:
+                log(
+                    "adapters.telegram",
+                    "info",
+                    f"envid routing matched envid={envid} chat_id={chat_id} user_id={sender_user_id} chat_type={event_ctx.get('chat_type') or '-'}",
+                )
+            else:
+                log(
+                    "adapters.telegram",
+                    "warning",
+                    f"envid routing no_match chat_id={chat_id} user_id={sender_user_id} chat_type={event_ctx.get('chat_type') or '-'}; using base adapter config",
+                )
+            return envid
         except Exception as e:
-            log("adapters.telegram", "warning", f"join ingest envid resolution failed: {e}")
+            log(
+                "adapters.telegram",
+                "warning",
+                f"envid routing failed chat_id={chat_id} user_id={sender_user_id} chat_type={event_ctx.get('chat_type') or '-'}: {e}",
+            )
             return None
 
     def _safe_corpus_id(self, chat_id: str) -> str:
@@ -242,7 +261,7 @@ class TelegramAdapter(Adapter):
         chat_id = str(getattr(chat, "id", "") or "").strip()
         if not chat_id:
             return
-        envid = self._resolve_envid_for_chat(chat)
+        envid = self._resolve_envid_for_chat(chat, user)
         recent = self._recent_group_messages.get(chat_id, [])[-30:]
         message = getattr(update, "effective_message", None)
         message_id = str(getattr(message, "message_id", "") or "")
@@ -425,6 +444,8 @@ class TelegramAdapter(Adapter):
             dict with 'result' key containing agent response
         """
         context = context or {}
+        sender_user_id = str(context.get("user_id", "") or "-")
+        chat_id = int(user_id)
         event_ctx = {
             "chat_id": context.get("chat_id", user_id),
             "chat_username": context.get("chat_username", ""),
@@ -434,8 +455,25 @@ class TelegramAdapter(Adapter):
         try:
             envid = self.resolve_envid(event_ctx, explicit_envid=explicit_envid)
         except Exception as e:
-            log("adapters.telegram", "warning", f"envid resolution failed: {e}")
+            log(
+                "adapters.telegram",
+                "warning",
+                f"envid routing failed chat_id={chat_id} user_id={sender_user_id} explicit_envid={explicit_envid or '-'} chat_type={event_ctx.get('chat_type') or '-'}: {e}",
+            )
             return {"error": f"envid resolution failed: {e}"}
+
+        if envid:
+            log(
+                "adapters.telegram",
+                "info",
+                f"envid routing matched envid={envid} chat_id={chat_id} user_id={sender_user_id} explicit_envid={explicit_envid or '-'} chat_type={event_ctx.get('chat_type') or '-'}",
+            )
+        else:
+            log(
+                "adapters.telegram",
+                "warning",
+                f"envid routing no_match chat_id={chat_id} user_id={sender_user_id} explicit_envid={explicit_envid or '-'} chat_type={event_ctx.get('chat_type') or '-'}; using base adapter config",
+            )
 
         runtime_cfg = self.assemble_runtime_config(envid=envid)
         runtime_enabled = bool(runtime_cfg.get("enabled", self.enabled))
@@ -447,13 +485,12 @@ class TelegramAdapter(Adapter):
             return {"error": "Telegram adapter not enabled"}
 
         agent_id = agent_id or default_agent
-        chat_id = int(user_id)
         context = {**context, "envid": envid} if envid else dict(context)
         
         log(
             "adapters.telegram",
             "info",
-            f"received message from user {chat_id} envid={envid or '-'}: '{message[:50]}{'...' if len(message) > 50 else ''}'",
+            f"received message from user_id={sender_user_id} chat_id={chat_id} envid={envid or '-'}: '{message[:50]}{'...' if len(message) > 50 else ''}'",
         )
         log("adapters.telegram", "debug", f"routing to agent '{agent_id}' envid={envid or '-'}")
 

@@ -64,6 +64,22 @@
           "log_llm": true
         }
       },
+      "chat_group_helper2": {
+        "enabled": false,
+        "gate": {
+          "provider": "${FAST_LLM_PROVIDER:-default}",
+          "model": "${FAST_LLM_MODEL:-gpt-4o-mini}",
+          "instruction_files": [
+            "${AIBT_ROOT}/agent_files/chat_group_helper2.md"
+          ],
+          "fail_mode": "fail_closed"
+        },
+        "delegate_agent": "chat_group_helper",
+        "recent_messages_limit": 50,
+        "logging": {
+          "log_llm": true
+        }
+      },
       // Example per-agent corpus allowlist.
       // "researcher": {
       //   "enabled": true,
@@ -206,7 +222,7 @@
 
   // Optional environment overlays for per-chat/per-tenant behavior.
   "envids": {
-    "enabled": false,
+    "enabled": true,
     "strict_matching": false,
     // Optional deterministic order. Remaining items follow declaration order.
     "startup_order": [
@@ -218,6 +234,33 @@
       // "telegram": ["group_alpha", "group_beta"]
     },
     "items": {
+      "envid-telegram-bot2": {
+        "title": "Telegram bot2 routing",
+        "matching": {
+          "adapters": {
+            "telegram": {
+              "chat_types": ["private", "group", "supergroup"]
+            }
+          }
+        },
+        "runtime": { "enabled": true },
+        "config": {
+          "adapters": {
+            "items": {
+              "telegram": {
+                "default_agent": "chat_group_helper2"
+              }
+            }
+          },
+          "agents": {
+            "items": {
+              "chat_group_helper2": {
+                "enabled": true
+              }
+            }
+          }
+        }
+      },
       // "group_alpha": {
       //   "title": "Telegram group alpha",
       //   "matching": {
