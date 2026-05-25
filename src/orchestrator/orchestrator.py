@@ -355,6 +355,33 @@ class AgentOrchestrator:
         raw = cls._error_text(exc)
         lowered = raw.lower()
 
+        if "upstream_timeout" in lowered or "upstream timeout" in lowered:
+            return (
+                "llm_upstream_timeout",
+                "LLM upstream timeout: provider backend is overloaded; task dropped.",
+                True,
+            )
+
+        if "upstream_error" in lowered:
+            if "404" in lowered:
+                return (
+                    "llm_upstream_404",
+                    "LLM upstream routing error (404): requested model/route is unavailable; task dropped.",
+                    True,
+                )
+            return (
+                "llm_upstream_error",
+                "LLM upstream error: backend is unavailable or overloaded; task dropped.",
+                True,
+            )
+
+        if "error code: 5" in lowered or "http 5" in lowered:
+            return (
+                "llm_upstream_5xx",
+                "LLM provider 5xx error: backend is unavailable or overloaded; task dropped.",
+                True,
+            )
+
         if "timeout_error" in lowered or "request timed out" in lowered or "timed out" in lowered:
             return (
                 "llm_timeout",
@@ -423,6 +450,8 @@ class AgentOrchestrator:
                     f"Task {task_id} failed in agent={agent_name} on retry={retries}: {err_code} ({err_text})",
                     tag="orchestrator",
                 )
+                self._set_task(task_id, status="error", result={"error": err_text, "error_code": err_code})
+                return {"status": "error", "error": err_text}
             else:
                 log(
                     "core",
