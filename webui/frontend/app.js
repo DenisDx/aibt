@@ -998,6 +998,57 @@ async function onAgentSelectionChange() {
   _renderAgentDialog();
 }
 
+const AGENT_TEMPLATE_TELEGRAM = `{
+  "adapter": "telegram",
+  "chat_id": -5090882532,
+  "chat_type": "group",
+  "chat_username": "my_group",
+  "message_id": 12345,
+  "user_id": 777000111,
+  "username": "john_doe",
+  "display_name": "John Doe",
+  "mentioned": false,
+  "direct_address": false,
+  "recent_messages": [
+    {
+      "role": "user",
+      "message_id": 12340,
+      "date": "2026-05-26 10:00:00+00:00",
+      "user_id": 111,
+      "display_name": "Alice",
+      "username": "alice",
+      "text": "Hello everyone"
+    },
+    {
+      "role": "assistant",
+      "message_id": null,
+      "date": "",
+      "user_id": null,
+      "display_name": "@your_bot",
+      "username": "your_bot",
+      "text": "Hello"
+    },
+    {
+      "role": "user",
+      "message_id": 12345,
+      "date": "2026-05-26 10:01:00+00:00",
+      "user_id": 777000111,
+      "display_name": "John Doe",
+      "username": "john_doe",
+      "text": "Your new question"
+    }
+  ]
+}`;
+
+function insertAgentTemplateTelegram() {
+  const inp = document.getElementById("agent-chat-input");
+  if (!inp) return;
+  const suffix = inp.value.trim() ? "\n\n" : "";
+  inp.value = inp.value + suffix + AGENT_TEMPLATE_TELEGRAM;
+  inp.focus();
+  inp.selectionStart = inp.selectionEnd = inp.value.length;
+}
+
 function _agentResultToText(result) {
   if (result == null) return '';
   if (typeof result === 'string') return result;

@@ -39,7 +39,11 @@ class ChatGroupHelperAgent(AgentBase):
                 MessagesPlaceholder("messages"),
             ]
         )
-        llm = build_llm(self.app_config)
+        has_tools, tools_value = self._llm_tools_value()
+        if has_tools:
+            llm = build_llm(self.app_config, tools=tools_value)
+        else:
+            llm = build_llm(self.app_config)
         return self.prompt | llm
 
     async def handle(self, query: str, context=None) -> dict[str, Any]:

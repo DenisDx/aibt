@@ -42,11 +42,20 @@ class ChatGroupHelper2Agent(AgentBase):
         )
 
         gate = self._gate_config()
-        llm = build_llm(
-            self.app_config,
-            provider=str(gate.get("provider", "")).strip() or None,
-            model=str(gate.get("model", "")).strip() or None,
-        )
+        has_tools, tools_value = self._llm_tools_value()
+        if has_tools:
+            llm = build_llm(
+                self.app_config,
+                provider=str(gate.get("provider", "")).strip() or None,
+                model=str(gate.get("model", "")).strip() or None,
+                tools=tools_value,
+            )
+        else:
+            llm = build_llm(
+                self.app_config,
+                provider=str(gate.get("provider", "")).strip() or None,
+                model=str(gate.get("model", "")).strip() or None,
+            )
         return self.prompt | llm
 
     async def handle(self, query: str, context=None) -> dict[str, Any]:

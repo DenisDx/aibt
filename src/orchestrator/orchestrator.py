@@ -345,15 +345,32 @@ class AgentOrchestrator:
         text = str(exc).strip()
         return text or "unknown error"
 
-    @classmethod
-    def _classify_runtime_error(cls, exc: Exception | str | None) -> tuple[str, str, bool]:
+    def _llm_target_hint(self) -> str:
+        """Return human-readable LLM target from active provider config."""
+
+        models_cfg = self.config.get("models", {}) if isinstance(self.config, dict) else {}
+        providers = models_cfg.get("providers", {}) if isinstance(models_cfg, dict) else {}
+        provider = str(models_cfg.get("active_provider", "") or "").strip()
+        provider_cfg = providers.get(provider, {}) if isinstance(providers, dict) else {}
+        base_url = str(provider_cfg.get("baseUrl", "") or "").strip()
+
+        if provider and base_url:
+            return f"provider={provider} base_url={base_url}"
+        if provider:
+            return f"provider={provider}"
+        if base_url:
+            return f"base_url={base_url}"
+        return "provider=unknown"
+
+    def _classify_runtime_error(self, exc: Exception | str | None) -> tuple[str, str, bool]:
         """Classify runtime errors for concise logging and user-facing status.
 
         Output: (error_code, public_message, expected_operational_error).
         """
 
-        raw = cls._error_text(exc)
+        raw = self._error_text(exc)
         lowered = raw.lower()
+        target_hint = self._llm_target_hint()
 
         if "upstream_timeout" in lowered or "upstream timeout" in lowered:
             return (
@@ -385,14 +402,24 @@ class AgentOrchestrator:
         if "timeout_error" in lowered or "request timed out" in lowered or "timed out" in lowered:
             return (
                 "llm_timeout",
-                "LLM timeout: provider is overloaded or too slow; try again later.",
+                f"LLM timeout: cannot get a response from {target_hint}.",
                 True,
             )
 
-        if "apiconnectionerror" in lowered or "connection error" in lowered or "connection refused" in lowered:
+        if (
+            "apiconnectionerror" in lowered
+            or "connection error" in lowered
+            or "connection refused" in lowered
+            or "connecterror" in lowered
+            or "all connection attempts failed" in lowered
+            or "name or service not known" in lowered
+            or "temporary failure in name resolution" in lowered
+            or "network is unreachable" in lowered
+            or "no route to host" in lowered
+        ):
             return (
                 "llm_connection",
-                "LLM connection error: provider is unavailable; try again later.",
+                f"LLM connection error: cannot connect to {target_hint}.",
                 True,
             )
 
@@ -412,7 +439,7 @@ class AgentOrchestrator:
         envid = str((state.get("context", {}) or {}).get("envid", "")).strip() or None
         agents = self._agents_for_envid(envid)
         if agent_name not in agents:
-            err = f"Agent '{agent_name}' not found"
+            err = f"Agent '{agent_name}' not found or disabled"
             self._set_task(task_id, status="error", result={"error": err})
             return {"status": "error", "error": err}
 
@@ -585,7 +612,7 @@ class AgentOrchestrator:
         envid = str(ctx.get("envid", "")).strip() or None
         agents = self._agents_for_envid(envid)
         if agent_name not in agents:
-            raise ValueError(f"Agent '{agent_name}' not found")
+            raise ValueError(f"Agent '{agent_name}' not found or disabled")
         task_id = str(uuid.uuid4())
         now = self._utcnow_iso()
         self.tasks[task_id] = {
@@ -640,10 +667,20 @@ class AgentOrchestrator:
                 )
         except Exception as e:
             err_text = self._error_text(e)
-            log(
-                "core",
-                "error",
-                f"Task runner crashed for task {task_id} agent={agent_name}: {e}\n{traceback.format_exc()}",
-                tag="orchestrator",
-            )
+            err_code, public_text, expected = self._classify_runtime_error(e)
+            if expected:
+                log(
+                    "core",
+                    "warning",
+                    f"Task runner failed for task {task_id} agent={agent_name}: {err_code} ({public_text})",
+                    tag="orchestrator",
+                )
+                err_text = public_text
+            else:
+                log(
+                    "core",
+                    "error",
+                    f"Task runner crashed for task {task_id} agent={agent_name}: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
             self._set_task(task_id, status="error", result={"error": err_text})

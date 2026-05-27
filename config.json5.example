@@ -49,48 +49,50 @@
   // Agent system configuration (used from phase 2 onward).
   "agents": {
     "orchestrator": {
-      "max_retries": 1,
-      "retry_delay_sec": 0.5,
-      "fallback_agent": "echo",
+      "max_retries": 1,  // Retry attempts after the first failed execution.
+      "retry_delay_sec": 0.5,  // Delay between retry attempts in seconds.
+      "fallback_agent": "echo",  // Agent used after retries are exhausted.
     },
     "items": {
-      "echo": { "enabled": true },
-      "math": { "enabled": true },
-      "graph_echo": { "enabled": true },
+      "echo": { "enabled": true },  // Enable simple echo test agent.
+      "math": { "enabled": true },  // Enable simple math test agent.
+      "graph_echo": { "enabled": true },  // Enable LangGraph-based echo test agent.
       "chat_group_helper": {
-        "enabled": true,
-        "recent_messages_limit": 50,
+        "enabled": true,  // Enable conservative group helper agent.
+        // "tools": ["search", "fetch"],  // Optional raw tools passthrough to this agent's direct LLM requests.
+        "recent_messages_limit": 50,  // Recent message count included into model context.
         "logging": {
-          "log_llm": true
+          "log_llm": true  // Persist LLM request/response rows for this agent.
         }
       },
       "chat_group_helper2": {
-        "enabled": false,
+        "enabled": false,  // Enable two-stage gate+delegate helper agent.
+        // "tools": ["search", "fetch"],  // Optional raw tools passthrough to gate stage direct LLM requests.
         "gate": {
-          "provider": "${FAST_LLM_PROVIDER:-default}",
-          "model": "${FAST_LLM_MODEL:-gpt-4o-mini}",
+          "provider": "${FAST_LLM_PROVIDER:-default}",  // Provider key used by gate stage.
+          "model": "${FAST_LLM_MODEL:-gpt-4o-mini}",  // Fast gate model id.
           "instruction_files": [
             "${AIBT_ROOT}/agent_files/chat_group_helper2.md"
-          ],
-          "fail_mode": "fail_closed"
+          ],  // Gate instruction files appended to system prompt.
+          "fail_mode": "fail_closed"  // Gate failure policy: fail_closed or fail_open.
         },
-        "delegate_agent": "chat_group_helper",
-        "recent_messages_limit": 50,
+        "delegate_agent": "chat_group_helper",  // Smart delegate agent id after gate accepts.
+        "recent_messages_limit": 50,  // Recent message count used to build gate context.
         "logging": {
-          "log_llm": true
+          "log_llm": true  // Persist LLM request/response rows for this agent.
         }
       },
       // Example per-agent corpus allowlist.
-      // "researcher": {
-      //   "enabled": true,
-      //   "rag": {
-      //     "corpora": ["shared", "research-private"]
+      // "researcher": {  // Example agent id with corpus allowlist.
+      //   "enabled": true,  // Enable this example agent.
+      //   "rag": {  // Per-agent RAG settings block.
+      //     "corpora": ["shared", "research-private"]  // Allowed corpora for this agent.
       //   }
       // },
       // Example: per-agent config override.
-      // "myagent": {
-      //   "config": {
-      //     "logging": { "levels": { "agents": 3 } }
+      // "myagent": {  // Example custom agent id.
+      //   "config": {  // Overlay config applied only to this agent.
+      //     "logging": { "levels": { "agents": 3 } }  // Per-agent subsystem log level override.
       //   }
       // }
     },
@@ -99,9 +101,9 @@
   // External MCP servers (used from phase 3 onward).
   "mcp": {
     "items": {
-      // "mcp1": {
-      //   "tools_list": ["search", "fetch"],
-      //   "auth": { "token": "${MCP1_TOKEN}" },
+      // "mcp1": {  // MCP server id.
+      //   "tools_list": ["search", "fetch"],  // Allowed tool names for this server.
+      //   "auth": { "token": "${MCP1_TOKEN}" },  // Optional auth payload for server connection.
       // }
     },
   },
@@ -142,6 +144,8 @@
 
     "rag": {
       "enabled": true,
+      // Optional embedding vector dimension override (fallback when retrieval.embedding_dim is absent).
+      // "embedding_dim": 256,  // Optional global embedding dimension override.
       "ingest": {
         // Process queued jobs only in cron, while system is mostly idle.
         "max_jobs_per_tick": 3,
@@ -196,26 +200,29 @@
         "show_typing": false,  // Show typing indicator while waiting for agent response
         "polling": true,  // Use polling (true) or webhook (false)
         "polling_timeout": 30,  // Polling timeout in seconds
+        // "groupPolicy": "allowlist",  // Legacy compatibility key from older Telegram routing policies.
+        // "streaming": "partial",  // Legacy compatibility key for partial streaming modes.
         "timeoutSeconds": 100,  // Max wait for one agent task before silent skip
+        // "max_waiting_time": 100,  // Planned queue-wait timeout before watchdog terminates non-started tasks.
         "listen_private": true,  // Listen to private chats
         "listen_groups": true,  // Listen to groups/supergroups where bot is added
         // "allow_groups_list": [-1001234567890],  // Optional adapter ACL: when set, only listed group chat_ids are allowed; [] blocks all groups
         // "allow_users_list": [123456789, "allowed_username"],  // Optional adapter ACL: when set, only listed sender user ids/usernames are allowed
         "dialog_log_type": "telegram_dialog",  // Dedicated file logs/<dialog_log_type>.log with input+reaction pairs
         // Example with graph_echo agent:
-        // "enabled": true,
-        // "token": "${TELEGRAM_BOT_TOKEN}",
-        // "default_agent": "graph_echo",
-        // "polling": true,
-        // "polling_timeout": 30,
-        // "listen_private": true,
-        // "listen_groups": true,
-        // "allow_groups_list": [-1001234567890],
-        // "allow_users_list": [123456789, "allowed_username"],
-        // "dialog_log_type": "telegram_dialog",
+        // "enabled": true,  // Enable Telegram adapter.
+        // "token": "${TELEGRAM_BOT_TOKEN}",  // Telegram bot token.
+        // "default_agent": "graph_echo",  // Default agent for incoming Telegram messages.
+        // "polling": true,  // Use polling instead of webhook mode.
+        // "polling_timeout": 30,  // Long polling timeout in seconds.
+        // "listen_private": true,  // Accept private chats.
+        // "listen_groups": true,  // Accept group and supergroup chats.
+        // "allow_groups_list": [-1001234567890],  // Optional group ACL allowlist.
+        // "allow_users_list": [123456789, "allowed_username"],  // Optional sender ACL allowlist.
+        // "dialog_log_type": "telegram_dialog",  // Dedicated log type for dialog input/output records.
       },
       "cron": {
-        "enabled": true,
+        "enabled": true,  // Enable cron adapter registration.
       },
     },
   },
@@ -226,63 +233,63 @@
     "strict_matching": false,
     // Optional deterministic order. Remaining items follow declaration order.
     "startup_order": [
-      // "group_alpha",
-      // "group_beta"
+      // "group_alpha",  // Example envid id in explicit startup order.
+      // "group_beta"  // Example envid id in explicit startup order.
     ],
     // Optional per-adapter order overrides.
     "adapter_startup_order": {
-      // "telegram": ["group_alpha", "group_beta"]
+      // "telegram": ["group_alpha", "group_beta"]  // Adapter-specific envid startup order.
     },
     "items": {
       "envid-telegram-bot2": {
-        "title": "Telegram bot2 routing",
+        "title": "Telegram bot2 routing",  // Human-readable overlay title.
         "matching": {
           "adapters": {
             "telegram": {
-              "chat_types": ["private", "group", "supergroup"]
+              "chat_types": ["private", "group", "supergroup"]  // Telegram chat types matched by this envid.
             }
           }
         },
-        "runtime": { "enabled": true },
+        "runtime": { "enabled": true },  // Enable this envid runtime overlay.
         "config": {
           "adapters": {
             "items": {
               "telegram": {
-                "default_agent": "chat_group_helper2"
+                "default_agent": "chat_group_helper2"  // Override default Telegram agent under this envid.
               }
             }
           },
           "agents": {
             "items": {
               "chat_group_helper2": {
-                "enabled": true
+                "enabled": true  // Ensure delegate target agent is enabled under this envid.
               }
             }
           }
         }
       },
-      // "group_alpha": {
-      //   "title": "Telegram group alpha",
-      //   "matching": {
-      //     "adapters": {
-      //       "telegram": {
-      //         "chat_ids": [-1001234567890],
-      //         "chat_usernames": ["group_alpha"],
-      //         "chat_types": ["group", "supergroup"]
+      // "group_alpha": {  // Example additional envid id.
+      //   "title": "Telegram group alpha",  // Human-readable overlay title.
+      //   "matching": {  // Event matching rules for this envid.
+      //     "adapters": {  // Per-adapter matcher rules.
+      //       "telegram": {  // Telegram-specific matcher block.
+      //         "chat_ids": [-1001234567890],  // Matched Telegram chat ids.
+      //         "chat_usernames": ["group_alpha"],  // Matched Telegram chat usernames.
+      //         "chat_types": ["group", "supergroup"]  // Matched Telegram chat types.
       //       }
       //     }
       //   },
-      //   "runtime": { "enabled": true },
-      //   "config": {
-      //     "adapters": {
-      //       "items": {
-      //         "telegram": { "default_agent": "echo" }
+      //   "runtime": { "enabled": true },  // Enable this envid runtime overlay.
+      //   "config": {  // Overlay config applied when this envid matches.
+      //     "adapters": {  // Adapter config overlay section.
+      //       "items": {  // Adapter instances map.
+      //         "telegram": { "default_agent": "echo" }  // Override Telegram default agent for this envid.
       //       }
       //     },
-      //     "agents": {
-      //       "items": {
-      //         "echo": {
-      //           "instruction_files": ["${AIBT_ROOT}/agent_files/group_alpha.md"]
+      //     "agents": {  // Agent config overlay section.
+      //       "items": {  // Agent instances map.
+      //         "echo": {  // Target agent id under this envid.
+      //           "instruction_files": ["${AIBT_ROOT}/agent_files/group_alpha.md"]  // Envid-specific instruction files.
       //         }
       //       }
       //     }
@@ -293,32 +300,34 @@
 
   // Cron adapter configuration (for scheduled task execution).
   "cron": {
-    "enabled": true,
+    "enabled": true,  // Enable cron task runner section.
+    // Optional legacy schedule list consumed by CronAdapter (kept for compatibility).
+    // "schedules": [],  // Optional legacy schedule list consumed by CronAdapter.
     "tasks": [
       // Example scheduled task (requires schedule parsing):
       // {
-      //   "name": "daily_math",
-      //   "enabled": true,
-      //   "agent": "math",
+      //   "name": "daily_math",  // Task id/name used in logs.
+      //   "enabled": true,  // Enable this scheduled task.
+      //   "agent": "math",  // Target agent id executed by this task.
       //   "schedule": "0 9 * * *",  // daily at 09:00 (cron syntax)
-      //   "message": "Calculate the answer to the universe"
+      //   "message": "Calculate the answer to the universe"  // Input message/query sent to target agent.
       // },
       // {
-      //   "name": "hourly_check",
-      //   "enabled": false,
-      //   "agent": "echo",
+      //   "name": "hourly_check",  // Task id/name used in logs.
+      //   "enabled": false,  // Enable this scheduled task.
+      //   "agent": "echo",  // Target agent id executed by this task.
       //   "schedule": "0 * * * *",  // every hour
-      //   "message": "System check"
+      //   "message": "System check"  // Input message/query sent to target agent.
       // }
     ],
   },
 
   // PostgreSQL connection (used from phase 4 onward; container is set up in phase 1).
   "database": {
-    "host": "${PG_HOST:-127.0.0.1}",
-    "port": ${PG_PORT:-5432},
-    "user": "${PG_USER:-aibt}",
-    "password": "${PG_PASSWORD}",
-    "db": "${PG_DB:-aibt}",
+    "host": "${PG_HOST:-127.0.0.1}",  // PostgreSQL host.
+    "port": ${PG_PORT:-5432},  // PostgreSQL port.
+    "user": "${PG_USER:-aibt}",  // PostgreSQL user.
+    "password": "${PG_PASSWORD}",  // PostgreSQL password.
+    "db": "${PG_DB:-aibt}",  // PostgreSQL database name.
   },
 }

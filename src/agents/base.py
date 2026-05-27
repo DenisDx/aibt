@@ -164,6 +164,19 @@ class AgentBase(ABC):
         clean = [str(x).strip() for x in corpora if str(x).strip()]
         return clean or []
 
+    def _llm_tools_value(self) -> tuple[bool, Any]:
+        """Return explicit tools setting from agent config.
+
+        Output: (is_defined, value).
+        If key is not present, is_defined is False.
+        If key is present, value is forwarded as-is (None, [], list, etc).
+        """
+
+        cfg = self.agent_config if isinstance(self.agent_config, dict) else {}
+        if not isinstance(cfg, dict) or "tools" not in cfg:
+            return (False, None)
+        return (True, cfg.get("tools"))
+
     @staticmethod
     def _format_memory_context(
         semantic_hits: list[dict[str, Any]],

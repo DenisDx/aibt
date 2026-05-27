@@ -45,8 +45,23 @@ class GraphEchoAgent:
                 ("human", "{query}"),
             ]
         )
-        self.llm = build_llm(self.app_config)
+        has_tools, tools_value = self._llm_tools_value()
+        if has_tools:
+            self.llm = build_llm(self.app_config, tools=tools_value)
+        else:
+            self.llm = build_llm(self.app_config)
         self.graph = self._build_graph()
+
+    def _llm_tools_value(self) -> tuple[bool, Any]:
+        """Return explicit tools setting from agent config.
+
+        Output: (is_defined, value). Key absence means no passthrough.
+        """
+
+        cfg = self.agent_config if isinstance(self.agent_config, dict) else {}
+        if not isinstance(cfg, dict) or "tools" not in cfg:
+            return (False, None)
+        return (True, cfg.get("tools"))
 
     def _build_graph(self):
         """Build minimal one-node LangGraph pipeline."""
