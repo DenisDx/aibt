@@ -74,6 +74,51 @@ def _strip_json_fences(text: str) -> str:
     return text.strip()
 
 
+def _extract_first_json_block(text: str) -> str | None:
+    """Extract the first balanced JSON object/array substring from text."""
+
+    raw = str(text or "")
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch in "[{":
+            start = i
+            break
+    if start < 0:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in "[{":
+            stack.append(ch)
+            continue
+        if ch in "]}":
+            if not stack:
+                return None
+            opening = stack.pop()
+            if (opening, ch) not in {("[", "]"), ("{", "}")}:
+                return None
+            if not stack:
+                return raw[start : i + 1]
+    return None
+
+
 def _extract_json_payload(content: Any) -> Any:
     if isinstance(content, (dict, list)):
         return content
@@ -88,6 +133,12 @@ def _extract_json_payload(content: Any) -> Any:
     try:
         return json.loads(_strip_json_fences(text))
     except Exception as e:
+        candidate = _extract_first_json_block(text)
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
         preview = _preview_data_block(text)
         log(
             "memoryd",
@@ -401,6 +452,12 @@ class MemorydService:
         final_response: Any,
         muid: str | None = None,
         caller_tag: str | None = None,
+        work_hash: str | None = None,
+        request_text: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        tools: list[Any] | None = None,
+        context_types: list[Any] | None = None,
         types: list[Any] | None = None,
     ) -> dict[str, Any]:
         """Queue async update work for a memory namespace.
@@ -414,17 +471,41 @@ class MemorydService:
         resolved_types = self._normalize_types(types)
         source_context_preview = _preview_data_block(serialize_json(normalize_json_value(source_context)), head=100, tail=100)
         final_response_preview = _preview_data_block(str(final_response or ""), head=100, tail=100)
+        request_override = str(request_text or "")
+        request_override_preview = _preview_data_block(request_override, head=100, tail=100)
+        resolved_context_types = self._normalize_types(context_types)
+        norm_provider = str(provider).strip() if provider is not None and str(provider).strip() else None
+        norm_model = str(model).strip() if model is not None and str(model).strip() else None
+        norm_tools = normalize_json_value(tools) if tools is not None else None
         log(
             "memoryd",
             "info",
             (
                 "enqueue memory task params "
                 f"muid={muid} caller_tag={str(caller_tag or '').strip() or '<none>'} "
+                f"work_hash={str(work_hash or '').strip() or '<none>'} "
+                f"provider={norm_provider or '<default>'} model={norm_model or '<default>'} "
+                f"request_text_len={len(request_override)} request_text_preview={request_override_preview} "
+                f"context_types={resolved_context_types} tools={norm_tools if norm_tools is not None else '<default>'} "
                 f"types={resolved_types} "
                 f"source_context_len={len(str(source_context_preview))} source_context_preview={source_context_preview} "
                 f"final_response_len={len(str(final_response or ''))} final_response_preview={final_response_preview}"
             ),
         )
+        norm_caller_tag = str(caller_tag).strip() if caller_tag is not None and str(caller_tag).strip() else None
+        norm_work_hash = str(work_hash).strip() if work_hash is not None and str(work_hash).strip() else None
+        norm_request_text = str(request_text).strip() if request_text is not None and str(request_text).strip() else None
+        if norm_work_hash is not None:
+            inflight = self.store.find_inflight_tasks(muid, caller_tag=norm_caller_tag, work_hash=norm_work_hash)
+            if inflight:
+                return {
+                    "ok": True,
+                    "queued": False,
+                    "reason": "duplicate_inflight",
+                    "task_id": str(inflight[0].get("task_id") or ""),
+                    "muid": muid,
+                    "types": resolved_types,
+                }
         queue_cfg = self._memoryd_model_cfg().get("queue", {}) if isinstance(self._memoryd_model_cfg(), dict) else {}
         cancel_policy = str(queue_cfg.get("cancel_policy", "cancel_previous_same_muid") or "cancel_previous_same_muid").strip().lower()
         if caller_tag is not None and cancel_policy != "keep_all":
@@ -436,7 +517,13 @@ class MemorydService:
             {
                 "task_id": task_id,
                 "muid": muid,
-                "caller_tag": str(caller_tag).strip() if caller_tag is not None and str(caller_tag).strip() else None,
+                "caller_tag": norm_caller_tag,
+                "work_hash": norm_work_hash,
+                "request_text": norm_request_text,
+                "provider": norm_provider,
+                "model": norm_model,
+                "tools": norm_tools,
+                "context_types": resolved_context_types,
                 "requested_types": resolved_types,
                 "source_context": normalize_json_value(source_context),
                 "final_response": str(final_response or ""),
@@ -446,7 +533,7 @@ class MemorydService:
 
         self._dispatch_after_enqueue_async(task_id)
 
-        return {"ok": True, "task_id": task_id, "muid": muid, "types": resolved_types}
+        return {"ok": True, "queued": True, "task_id": task_id, "muid": muid, "types": resolved_types}
 
     def _dispatch_after_enqueue(self, task_id: str) -> None:
         """Run one non-cron worker tick after enqueue in background."""
@@ -724,30 +811,47 @@ class MemorydService:
     def _process_task(self, task: dict[str, Any]) -> dict[str, Any]:
         muid = str(task.get("muid") or "").strip().lower()
         requested_types = [str(x).strip().lower() for x in (deserialize_json(task.get("requested_types"), []) or []) if str(x).strip()]
+        context_types = [str(x).strip().lower() for x in (deserialize_json(task.get("context_types"), []) or []) if str(x).strip()]
+        request_override = str(task.get("request_text") or "").strip()
         if not muid:
             raise ValueError("task muid is required")
         try:
-            provider = self._active_provider()
-            model = self._active_model()
-            request_file = self._resolve_request_file_for_task(task, requested_types)
-            if not request_file:
-                self.store.mark_task_skipped(task["task_id"], "no exact request_file for requested_types")
+            provider = str(task.get("provider") or "").strip() or self._active_provider()
+            model = self._resolve_model_for_provider(provider, str(task.get("model") or "").strip() or None)
+            if request_override:
+                request_text = request_override
+                if not request_text:
+                    self.store.mark_task_skipped(task["task_id"], "request_text override is set but empty")
+                    return {"status": "skipped", "pruned": 0}
                 log(
                     "memoryd",
-                    "warning",
-                    f"memoryd task skipped: no exact request_file for task_id={task.get('task_id')} muid={muid} types={requested_types}",
+                    "info",
+                    f"memoryd task uses request_text override for task_id={task.get('task_id')} muid={muid} request_text_len={len(request_text)}",
                 )
-                return {"status": "skipped", "pruned": 0}
+            else:
+                request_file = self._resolve_request_file_for_task(task, requested_types)
+                if not request_file:
+                    self.store.mark_task_skipped(task["task_id"], "no exact request_file for requested_types")
+                    log(
+                        "memoryd",
+                        "warning",
+                        f"memoryd task skipped: no exact request_file for task_id={task.get('task_id')} muid={muid} types={requested_types}",
+                    )
+                    return {"status": "skipped", "pruned": 0}
 
-            request_text = self._load_request_text(request_file)
-            if not request_text:
-                self.store.mark_task_skipped(task["task_id"], f"missing request file: {request_file}")
-                return {"status": "skipped", "pruned": 0}
+                request_text = self._load_request_text(request_file)
+                if not request_text:
+                    self.store.mark_task_skipped(task["task_id"], f"missing request file: {request_file}")
+                    return {"status": "skipped", "pruned": 0}
 
-            snapshot = self._record_snapshot(muid, requested_types, DEFAULT_MEMORYD_LIMIT_PER_TYPE)
+            snapshot = self._record_snapshot(muid, context_types or requested_types, DEFAULT_MEMORYD_LIMIT_PER_TYPE)
             messages = self._build_llm_messages(request_text, task, snapshot)
 
-            llm = build_llm(self.config, provider=provider, model=model)
+            task_tools = deserialize_json(task.get("tools"), None)
+            if task_tools is None:
+                llm = build_llm(self.config, provider=provider, model=model)
+            else:
+                llm = build_llm(self.config, provider=provider, model=model, tools=task_tools)
             log_token = None
             if self._llm_logging_enabled():
                 log_token = push_llm_log_context(
@@ -775,6 +879,24 @@ class MemorydService:
             self.store.mark_task_failed(task["task_id"], err)
             log("memoryd", "error", f"memoryd task failed task_id={task.get('task_id')} muid={muid}: {err}")
             return {"status": "failed", "error": err, "pruned": 0}
+
+    def _resolve_model_for_provider(self, provider: str, model: str | None = None) -> str:
+        """Resolve explicit-or-default model for one provider."""
+
+        clean_provider = str(provider or "").strip()
+        clean_model = str(model or "").strip()
+        if clean_model:
+            return clean_model
+        if clean_provider == self._active_provider():
+            return self._active_model()
+
+        provider_cfg = self._provider_cfg(clean_provider)
+        models = provider_cfg.get("models", []) if isinstance(provider_cfg, dict) else []
+        if isinstance(models, list) and models:
+            first = models[0]
+            if isinstance(first, dict):
+                return str(first.get("id") or first.get("name") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+        return "gpt-4o-mini"
 
     def run_tick(self, limit: int | None = None) -> dict[str, Any]:
         """Run memoryd worker tick.

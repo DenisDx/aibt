@@ -37,7 +37,7 @@ class OrchestratorState(TypedDict, total=False):
 class AgentOrchestrator:
     """Routes tasks to agents through a LangGraph workflow."""
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, *, init_adapters: bool = True):
         self.config = config or {}
         self.root_dir = str(self.config.get("root") or self._default_root_dir())
         self.agent_classes: Dict[str, Type[Any]] = self._discover_agent_classes()
@@ -45,11 +45,72 @@ class AgentOrchestrator:
         self.agents: Dict[str, Any] = {}
         self.adapters: Dict[str, Adapter] = {}
         self._agents_by_envid: Dict[str | None, Dict[str, Any]] = {}
+        self._init_hooks_done = False
         self.tasks: Dict[str, dict] = {}  # id -> {status, agent, query, result}
         self.checkpointer, self.store = build_langgraph_runtime(self.root_dir, self.config, "orchestrator")
         self._init_agents()
-        self._init_adapters()
+        if init_adapters:
+            self._init_adapters()
         self.graph = self._build_graph()
+
+    def _iter_agent_instances(self) -> list[tuple[str | None, str, Any]]:
+        """Return all active instantiated agents across default and envid registries."""
+
+        rows: list[tuple[str | None, str, Any]] = []
+        for envid, agents in self._agents_by_envid.items():
+            if not isinstance(agents, dict):
+                continue
+            for agent_id, agent in agents.items():
+                rows.append((envid, agent_id, agent))
+        return rows
+
+    async def _run_lifecycle_hook(self, hook_name: str, runtime: dict[str, Any] | None = None) -> dict[str, int]:
+        """Run one lifecycle hook for all active agent instances with error isolation."""
+
+        base_runtime = runtime if isinstance(runtime, dict) else {}
+        called = 0
+        failed = 0
+        for envid, agent_id, agent in self._iter_agent_instances():
+            hook = getattr(agent, hook_name, None)
+            if not callable(hook):
+                continue
+            payload = dict(base_runtime)
+            payload.setdefault("hook", hook_name)
+            payload.setdefault("agent_id", agent_id)
+            payload.setdefault("envid", envid)
+            try:
+                result = hook(payload)
+                if inspect.isawaitable(result):
+                    await result
+                called += 1
+            except Exception as e:
+                failed += 1
+                log(
+                    "core",
+                    "error",
+                    f"Lifecycle hook failed: hook={hook_name} agent={agent_id} envid={envid or '-'}: {e}\n{traceback.format_exc()}",
+                    tag="orchestrator",
+                )
+        return {"called": called, "failed": failed}
+
+    async def run_init_hooks(self, runtime: dict[str, Any] | None = None) -> dict[str, int]:
+        """Run `on_init` once for all active agent instances."""
+
+        if self._init_hooks_done:
+            return {"called": 0, "failed": 0}
+        stats = await self._run_lifecycle_hook("on_init", runtime)
+        self._init_hooks_done = True
+        return stats
+
+    async def run_cron_tick_hooks(self, runtime: dict[str, Any] | None = None) -> dict[str, int]:
+        """Run `on_cron_tick` for all active agent instances."""
+
+        return await self._run_lifecycle_hook("on_cron_tick", runtime)
+
+    async def run_shutdown_hooks(self, runtime: dict[str, Any] | None = None) -> dict[str, int]:
+        """Run `on_shutdown` for all active agent instances."""
+
+        return await self._run_lifecycle_hook("on_shutdown", runtime)
 
     @staticmethod
     def _default_root_dir() -> str:

@@ -107,6 +107,12 @@ class MemorydStore:
                       task_id UUID PRIMARY KEY,
                       muid TEXT NOT NULL,
                       caller_tag TEXT,
+                                            work_hash TEXT,
+                                            request_text TEXT,
+                                            provider TEXT,
+                                            model TEXT,
+                                            tools JSONB,
+                                            context_types JSONB,
                       requested_types JSONB NOT NULL DEFAULT '[]'::jsonb,
                       source_context JSONB NOT NULL DEFAULT '{}'::jsonb,
                       final_response TEXT NOT NULL DEFAULT '',
@@ -121,10 +127,35 @@ class MemorydStore:
                     )
                     """
                 )
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS work_hash TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS provider TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS model TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS tools JSONB")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS context_types JSONB")
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_name = 'memoryd_tasks' AND column_name = 'codex_agent'
+                        ) AND NOT EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_name = 'memoryd_tasks' AND column_name = 'request_text'
+                        ) THEN
+                            EXECUTE 'ALTER TABLE memoryd_tasks RENAME COLUMN codex_agent TO request_text';
+                        END IF;
+                    END $$;
+                    """
+                )
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS request_text TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_muid_type_updated ON memoryd_records(muid, type, updated_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_lookup ON memoryd_records(muid, type, title)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_status_prio_created ON memoryd_tasks(status, prio DESC, created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_muid_caller_status ON memoryd_tasks(muid, caller_tag, status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_muid_workhash_status ON memoryd_tasks(muid, work_hash, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_created ON memoryd_tasks(created_at ASC)")
 
     def _json_value(self, value: Any) -> Any:
@@ -417,12 +448,20 @@ class MemorydStore:
         source_context_preview = _preview_data_block(source_context_text, head=100, tail=100)
         final_response = str(task.get("final_response") or "")
         final_response_preview = _preview_data_block(final_response, head=100, tail=100)
+        request_text = str(task.get("request_text") or "")
+        request_preview = _preview_data_block(request_text, head=100, tail=100)
+        provider = str(task.get("provider") or "").strip()
+        model = str(task.get("model") or "").strip()
         log(
             "memoryd",
             "info",
             (
                 "create memory task params "
                 f"task_id={task.get('task_id')} muid={task.get('muid')} caller_tag={task.get('caller_tag')} "
+                f"work_hash={task.get('work_hash')} "
+            f"provider={provider or '<default>'} model={model or '<default>'} "
+                f"request_text_len={len(request_text)} request_text_preview={request_preview} "
+            f"context_types={task.get('context_types') or []} tools={task.get('tools') if task.get('tools') is not None else '<default>'} "
                 f"requested_types={task.get('requested_types') or []} "
                 f"source_context_len={len(source_context_text)} source_context_preview={source_context_preview} "
                 f"final_response_len={len(final_response)} final_response_preview={final_response_preview}"
@@ -434,19 +473,83 @@ class MemorydStore:
                 cur.execute(
                     """
                     INSERT INTO memoryd_tasks(
-                      task_id, muid, caller_tag, requested_types, source_context, final_response, status, prio
-                    ) VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                                            task_id, muid, caller_tag, work_hash, request_text, provider, model, tools, context_types, requested_types, source_context, final_response, status, prio
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                     """,
                     (
                         task["task_id"],
                         task["muid"],
                         task.get("caller_tag"),
+                        task.get("work_hash"),
+                        task.get("request_text"),
+                                                task.get("provider"),
+                                                task.get("model"),
+                                                self._json_value(task.get("tools")) if task.get("tools") is not None else None,
+                                                self._json_value(task.get("context_types")) if task.get("context_types") is not None else None,
                         self._json_value(task.get("requested_types") or []),
                         self._json_value(task.get("source_context") or {}),
                         str(task.get("final_response") or ""),
                         int(task.get("prio", 0)),
                     ),
                 )
+
+    def find_inflight_tasks(
+        self,
+        muid: str,
+        caller_tag: str | None = None,
+        work_hash: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find in-flight tasks for one MUID by caller_tag/work_hash.
+
+        Input: muid and optional caller_tag/work_hash.
+        Output: pending/running task rows that match at least one provided key.
+        """
+
+        if caller_tag is None and work_hash is None:
+            return []
+        where: list[str] = ["muid=%s", "status IN ('pending','running')"]
+        params: list[Any] = [muid]
+        keys: list[str] = []
+        if caller_tag is not None:
+            keys.append("caller_tag=%s")
+            params.append(caller_tag)
+        if work_hash is not None:
+            keys.append("work_hash=%s")
+            params.append(work_hash)
+        where.append("(" + " OR ".join(keys) + ")")
+        sql = (
+            "SELECT * FROM memoryd_tasks WHERE "
+            + " AND ".join(where)
+            + " ORDER BY created_at ASC, task_id ASC"
+        )
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return [dict(row) for row in cur.fetchall()]
+
+    def count_inflight_tasks_by_caller_prefix(self, prefix: str) -> int:
+        """Count in-flight tasks whose caller_tag starts with prefix.
+
+        Input: caller_tag prefix.
+        Output: number of pending/running tasks.
+        """
+
+        text = str(prefix or "").strip()
+        if not text:
+            return 0
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM memoryd_tasks
+                    WHERE status IN ('pending','running')
+                      AND caller_tag LIKE %s
+                    """,
+                    (text + "%",),
+                )
+                row = cur.fetchone()
+                return int((row or {}).get("count", 0) or 0)
 
     def fetch_pending_tasks(self, limit: int) -> list[dict[str, Any]]:
         """Fetch pending tasks in FIFO order.

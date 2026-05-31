@@ -49,4 +49,5 @@ docker/volumes/
 .coverage
 htmlcov/
 .tox/
-
+.test-results/
+local_*.*

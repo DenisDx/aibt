@@ -51,6 +51,30 @@ class AgentBase(ABC):
     def build_chain(self):
         """Build and return LangChain runnable chain."""
 
+    async def on_init(self, runtime: dict[str, Any]) -> None:
+        """Lifecycle hook called once after agent instantiation."""
+
+        return None
+
+    async def on_cron_tick(self, runtime: dict[str, Any]) -> None:
+        """Lifecycle hook called on each cron tick for active agent instances."""
+
+        return None
+
+    async def on_shutdown(self, runtime: dict[str, Any]) -> None:
+        """Lifecycle hook called during graceful application shutdown."""
+
+        return None
+
+    async def _postprocess_result(self, result: Any, *, query: str, context: dict[str, Any], envid: str | None) -> Any:
+        """Optional protected hook for agent-specific result normalization.
+
+        Input: raw model/chain result and request context.
+        Output: normalized result payload to be persisted and returned.
+        """
+
+        return result
+
     async def handle(self, query: str, context=None) -> dict:
         """Execute LangChain chain and return unified result payload."""
         ctx = context or {}
@@ -151,6 +175,7 @@ class AgentBase(ABC):
             if log_token is not None:
                 pop_llm_log_context(log_token)
         content = getattr(out, "content", out)
+        content = await self._postprocess_result(content, query=query, context=ctx, envid=envid)
 
         if memory_enabled:
             try:

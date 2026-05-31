@@ -1,0 +1,430 @@
+# Memory Executor Agent Proposal (V1)
+
+## 1. Scope and Goal
+
+Introduce a new scheduled agent that executes LLM requests on a cron-driven basis.
+
+- Primary goal in V1: produce memory mutations through memoryd tasks.
+- Non-goal in V1: direct writes to legacy `memory` subsystem (future extension).
+
+The agent is intended for recurring autonomous jobs (for example, periodic research) and condition-based jobs driven by `todo` records in memory.
+
+agent id: memory_executor
+
+## 2. Agent Placement and Lifecycle
+
+- Code location: standard agents directory, proposed path `src/agents/memory_executor/`.
+- Agent is optional and must not be a hard runtime dependency.
+- If agent folder/config is absent, the platform must continue normal operation (webui part must handle it properly, Memory Executor panel must be hidden).
+
+Execution model:
+1. Cron tick invokes base-agent hook.
+2. Hook evaluates due jobs from DB.
+3. For each runnable job, the agent enqueues memoryd work (not direct LLM execution in V1).
+4. memoryd performs model call and memory mutation.
+
+Resolved proposal for base-class hook contracts (applies to all agents):
+
+- Add optional async lifecycle hooks to AgentBase:
+	- `async def on_init(self, runtime: dict[str, Any]) -> None`
+	- `async def on_cron_tick(self, runtime: dict[str, Any]) -> None`
+	- `async def on_shutdown(self, runtime: dict[str, Any]) -> None`
+- Default implementation in AgentBase is no-op for all 3 hooks.
+- Orchestrator/Core keeps a registry of instantiated agents and calls hooks sequentially for all active agents.
+- Hook execution errors are isolated per agent: log warning/error and continue with next agent.
+- If an agent package is absent, it is simply not discovered/instantiated, therefore no hook calls occur.
+- Direct agent-to-agent calls/imports are allowed when explicitly designed.
+- External non-agent modules should avoid hard coupling to concrete agent implementations and should prefer orchestrator/adapter APIs.
+
+Recommended invocation points:
+1. `on_init` during orchestrator startup after agent instantiation.
+2. `on_cron_tick` in cron runner for each discovered active agent instance.
+3. `on_shutdown` during graceful app stop.
+
+## 3. Runtime Architecture (V1)
+
+### 3.1 Default/Only Mode in V1
+
+- `memoryd` is the default and only execution backend.
+- Agent run = one evaluation cycle that may create zero, one, or multiple `memoryd` queue tasks.
+- Actual processing responsibility belongs to `memoryd` workers.
+
+Normal zero-task outcomes (not an error):
+- no configured tasks for this agent/envid;
+- tasks exist but are not due by `period_sec`;
+- todo-gated task is due for check but no matching todo record is found;
+- todo record exists but current status/content rules say "skip" for this cycle.
+
+Normal high-volume outcomes (also not an error):
+- one evaluation cycle may enqueue many tasks (including hundreds) when many task definitions become due at the same time;
+- tasks may belong to multiple `envid` scopes and resolve into different `muid` queues.
+
+Operational expectation for high-volume mode (V1):
+- enqueue is append-only and should not block on immediate execution capacity;
+- actual execution fairness/ordering is delegated to memoryd queue semantics (including same-MUID ordering rules);
+- cron evaluation should process due-task candidates in bounded batches using `max_due_tasks_per_tick` to avoid long single-tick stalls.
+
+### 3.2 Future Backends
+
+- Future versions may support legacy `memory` and other memory backends.
+- V1 decision: do not introduce full backend abstraction layer.
+- V1 uses a partial backend bridge contract: `memoryd` remains the only concrete backend, but agent code calls a small set of backend-facing methods that are backend-agnostic by signature.
+
+Minimal backend bridge method set (V1):
+1. `initialize(runtime_ctx) -> None`
+2. `resolve_scope(task_row, runtime_ctx) -> { envid, muid }`
+3. `build_request(task_row, todo_payload, runtime_ctx) -> request_payload`
+4. `enqueue(request_payload, runtime_ctx) -> { queued: bool, task_id?: str, reason?: str }`
+5. `can_enqueue_now(task_row, runtime_ctx) -> { allowed: bool, reason?: str }`
+6. `health(runtime_ctx) -> { ok: bool, details?: dict }`
+
+V1 mapping to memoryd:
+- `initialize` -> memoryd service init/check.
+- `resolve_scope` -> effective envid + resolved muid selection.
+- `build_request` -> convert task + optional todo payload into memoryd enqueue payload.
+- `enqueue` -> `memoryd.enqueue_update(...)`.
+- `can_enqueue_now` -> execution policy checks (`idle`, optional queue/capacity checks).
+- `health` -> lightweight backend availability check for diagnostics/UI.
+
+This keeps V1 implementation simple while preserving a stable call surface for future backends.
+
+## 4. Configuration Model
+
+Agent config is under `agents.items.memory_executor` and can be overridden by envid effective config.
+
+Recommended V1 config:
+
+```json5
+{
+	"agents": {
+		"items": {
+			"memory_executor": {
+				"enabled": true,
+				"execution_policy": "idle",
+				"max_due_tasks_per_tick": 200,
+				"memoryd": {
+					"context_types": ["semantic", "episodic", "summaries", "news", "news_memory"],
+					"update_types": ["semantic", "episodic", "summaries", "news", "news_memory"]
+				},
+				"logging": {
+					"log_llm": true
+				}
+			}
+		}
+	}
+}
+```
+
+Notes:
+- `context_types` and `update_types` are default sets and can be narrowed per task.
+- Validation should drop unsupported values with warning logs (same policy as other agents).
+- `max_due_tasks_per_tick` limits how many due task definitions may be evaluated/enqueued in one cron cycle.
+- Recommended default for V1: `200`.
+- `0` means "no per-tick cap" (use with caution on large deployments).
+- If due candidates exceed the cap, remaining candidates are deferred to next cron ticks.
+
+## 5. Execution Policy
+
+`execution_policy` controls launch eligibility.
+
+- `idle`: start only when no task is currently running for this agent; if openaix is used, also require positive capacity signal.
+- `always`: ignore idleness and allow scheduling whenever due.
+- `queue_aware`: allow start only if queue depth for target provider/model is below configured threshold. (to be implemented in V2)
+
+precedence:
+1. schedule-level override
+2. task-level override
+3. agent default config
+
+
+## 6. Memory Usage Rules
+
+- Reuse common memory access logic from base agent to avoid duplication.
+- V1 supports memoryd only.
+- Per-task narrowing of `context_types` and `update_types` is mandatory.
+
+Example optimization scenario:
+- News collector task reads `news/news_memory` and writes only `news/news_memory`.
+- Excludes unrelated channels (for example, `episodic`, `summaries`) to reduce context size.
+
+## 7. Tool Injection Policy
+
+Each task may define tools forwarded to model execution backend.
+
+- `null` -> do not override tools field (backend default behavior).
+- `[]` -> explicitly disable tool injection.
+- `["tool_a", "tool_b"]` -> allowlist only these tools.
+
+Resolved semantics for `null`:
+- `null` means "DO NOT SEND `tools` FIELD" in the OpenAI/OpenAIx request payload.
+- This explicitly keeps provider-side default behavior.
+- No empty array should be substituted for `null`.
+
+## 8. Output Contract
+
+Two output channels are supported conceptually:
+1. Tool calls.
+2. Memory mutations.
+
+Primary channel in V1: memory mutation JSON compatible with memoryd mutation contract.
+
+Resolved decision:
+- `memory_executor` does not define an independent mutation JSON schema in V1.
+- It reuses the existing `memoryd` mutation contract as the source of truth.
+- Versioning/compatibility rules are owned by `memoryd`; `memory_executor` is a producer/orchestrator only.
+
+## 9. Persistence Model (PostgreSQL)
+
+Use project PostgreSQL.
+
+### 9.1 `memory_executor_tasks`
+
+Proposed columns:
+- `id` bigint generated always as identity primary key
+- `name` text not null (human-readable task name)
+- `envid` text null (default runtime envid)
+- `period_sec` int null (minimum seconds between launches)
+- `todo_title` text null (trigger title in `todo` memory)
+- `prio` int not null default 8
+- `request_text` text not null (task request text)
+- `provider` text null
+- `model` text null
+- `tools` jsonb null
+- `context_types` jsonb null
+- `update_types` jsonb null
+- `execution_policy` text null
+- `enabled` boolean not null default true
+- `last_run_at` timestamptz null
+- `created_at` timestamptz not null default now()
+- `updated_at` timestamptz not null default now()
+
+### 9.2 `memory_executor_schedules` (Not in V1)
+
+Complex conditions are deferred.
+
+Resolved decision:
+- Do not create `memory_executor_schedules` table in V1 migrations.
+- V1 supports only period-based and todo-gated triggering from `memory_executor_tasks`.
+- Advanced/compound launch conditions may be introduced in V2 (optional, not guaranteed).
+
+## 10. Trigger and Run Semantics
+
+Two scenario groups:
+
+### 10.1 Pure Periodic Mode (`todo_title is null`)
+
+- Launch every `period_sec` when due.
+- No additional user payload is attached.
+
+### 10.2 Todo-Driven Mode (`todo_title is not null`)
+
+At due check:
+1. Find memoryd `todo` records with matching title in effective envid/muid scope.
+2. If no record found: do not run and reset timer window.
+3. If records found: process records sequentially.
+
+Per record handling:
+- If record text is not valid JSON: run and pass raw text as user-context payload.
+- If valid JSON:
+	- if `status` is missing or not in `{done, cancelled, error}` -> run
+	- if `status` in `{done, cancelled, error}` -> skip and reset timer window
+- If JSON has `text`, pass it as user-context payload.
+
+This allows tasks to self-complete by setting `status` or transferring control to another task.
+
+Resolved timer reset semantics (V1):
+- Reset timer after every completed evaluation cycle branch, except temporary-defer branches.
+- Temporary-defer branch means "work was not performed due to potentially temporary reason".
+
+Reset timer = YES:
+- no matching todo record found;
+- todo record status/content indicates skip (`done`/`cancelled`/`error`);
+- invalid JSON todo payload but enqueue attempt was made and accepted or deterministically rejected as non-temporary.
+
+Reset timer = NO (retry on next tick):
+- enqueue was deferred due to temporary conditions (for example, execution policy gate such as `idle` busy state, backend temporary unavailability, capacity/queue backpressure);
+- evaluation batch hit `max_due_tasks_per_tick` and not all due candidates were processed.
+
+### 10.3 Duplicate Enqueue Protection
+
+To prevent repeated enqueue of the same logical todo work while previous one is still in queue/processing:
+
+- compute deterministic `enqueue_key` per logical run candidate;
+- compute deterministic `work_hash` from source todo content;
+- pass `caller_tag = enqueue_key` and optional `work_hash` in memoryd enqueue request;
+- before enqueue, check memoryd for in-flight task with same `(muid, caller_tag)` or same `(muid, work_hash)` in states `pending` or `running`;
+- if in-flight exists, skip enqueue (treat as successful dedup, not an error).
+
+Recommended `enqueue_key` format:
+- periodic task: `mx:{task_id}:periodic`
+- todo-driven task: `mx:{task_id}:todo:{todo_record_id}`
+- fallback if todo record id is unavailable: `mx:{task_id}:todo:{sha256(normalized_title + "|" + normalized_text)}`
+
+Recommended `work_hash` calculation (done in agent before enqueue):
+- algorithm: `sha256`
+- source string (exact, no semantic normalization):
+	`v1|task_id={task_id}|muid={muid}|todo_title={exact_title}|todo_text={exact_text}`
+- `work_hash` is optional in enqueue API, but required for todo-driven dedup in `memory_executor`.
+
+Rationale:
+- keeps idempotency stable across ticks;
+- avoids duplicate queue pressure;
+- preserves explicit per-task/per-todo identity across envid/muid scopes.
+
+### 10.4 Required Memoryd Extension For Dedup
+
+This proposal requires a small explicit memoryd enhancement:
+
+- enqueue API:
+	- add optional parameter `work_hash: str | null` (or generic `dedup_hash`, same semantics).
+- persistence:
+	- store this value in queued/running task rows (nullable column).
+- lookup capability:
+	- provide queue check helper to detect in-flight task by `(muid, caller_tag)` and/or `(muid, work_hash)`.
+- recommended DB support:
+	- index for fast in-flight lookup by `muid + caller_tag + status`;
+	- index for fast in-flight lookup by `muid + work_hash + status`.
+
+Behavior rule:
+- if matching in-flight task exists, enqueue returns dedup result (`queued=false`, `reason=duplicate_inflight`) and does not insert a new task.
+
+### 10.5 Memory Executor Codex Override
+
+For `memory_executor` tasks, prompt source can be task-provided text instead of `memoryd.requests` mapping.
+
+Contract:
+- `memoryd.enqueue_update(...)` includes optional `request_text: str | null = null`.
+- `memory_executor` passes task `request_text` (after placeholder resolution) as `request_text` payload text.
+
+Memoryd runtime rule:
+- if `request_text` is not null:
+	- do not resolve `memoryd.requests`;
+	- do not search `request_file` by `requested_types`;
+	- use the task-provided text directly as mutation codex prompt.
+- if `request_text` is null:
+	- preserve existing behavior using exact `request_file` resolution.
+
+Persistence impact:
+- `memoryd_tasks.request_text` (nullable) to persist execution mode.
+
+Rationale:
+- `memory_executor` task text is the source of truth for executor-specific logic;
+- avoids global config coupling for executor-only flows;
+- keeps backward compatibility for all non-executor memoryd producers.
+
+Naming note:
+- implementation uses `request_text` naming for both `memory_executor_tasks` and `memoryd_tasks` override flows.
+
+## 11. Integration Rules
+
+- External services must not depend directly on concrete agent modules.
+- Startup/cron integration points should call base-class registries and optional hooks.
+- LLM logging should be centralized at shared layer if not already fully shared.
+
+Lifecycle hook runtime payload contract (V1):
+
+- Hook signatures:
+	- `on_init(runtime: dict[str, Any])`
+	- `on_cron_tick(runtime: dict[str, Any])`
+	- `on_shutdown(runtime: dict[str, Any])`
+- `runtime` is always a dict.
+- Required keys for each hook call:
+	- `hook`: one of `on_init`, `on_cron_tick`, `on_shutdown`
+	- `agent_id`: current agent id
+	- `envid`: resolved envid for this agent instance, or `null` for global/default instance
+	- `source`: caller source string (`webui.start`, `core.cron`, `webui.stop`, etc.)
+	- `root_dir`: absolute project root path
+- Optional keys (when available):
+	- `tick_ts`: UTC timestamp for cron tick dispatch
+	- `trace_id`: correlation id for one dispatch cycle
+	- `cancel_requested`: bool hint for graceful early stop (default `false`)
+
+Runtime behavior contract:
+- Hooks are called sequentially for all active instantiated agents.
+- Exception in one hook must not stop dispatch for remaining agents.
+- Unknown extra keys in `runtime` are allowed and must be ignored by agents for forward compatibility.
+- Agents should treat missing optional keys as normal and use safe defaults.
+
+## 12. API and WebUI (Memory Executor Tab)
+
+WebUI adds a dedicated `Memory Executor` tab.
+
+Capabilities:
+- select envid
+- list tasks for selected envid
+- create task
+- edit task
+- delete task with confirmation
+
+Template UX:
+- Task request editor supports applying templates from agent folder `templates/*.md`.
+- UI includes template selector + `Apply Template` action.
+- Templates are not edited in WebUI in V1.
+- On apply, template content is copied into task `text` field; user may edit that task text freely.
+
+Placeholder support in template/task text (V1):
+- both template files and task `text` may contain placeholders in `${VAR}` / `${VAR:-default}` form;
+- before enqueue, agent resolves placeholders from `.env`/effective environment (same substitution model as project config);
+- unresolved placeholders without default should produce a validation warning and skip enqueue for that cycle;
+- future versions may extend placeholder resolvers beyond `.env` (runtime context, memory lookups, etc.).
+
+Initial templates:
+1. News seeker template:
+	 - instruct periodic AI-news search
+	 - store important news to `news`
+	 - store source/resource list to `news_memory`
+	 - include mutation formatting guidance
+2. Orchestrator template:
+	 - read incoming `todo`
+	 - decide target downstream agent
+	 - create reassigned `todo` item with title = target agent name
+
+## 13. Validation and Safety Rules
+
+- Agent must validate effective memory types against enabled memoryd types.
+- Invalid per-task overrides are filtered with warnings.
+- Tool policy must be explicit in stored task payload.
+- Task execution must be idempotent as far as practical, especially in todo-triggered flows.
+
+Resolved anti-duplicate strategy:
+- use deterministic `enqueue_key` + `work_hash` dedup checks against in-flight queue state.
+
+## 14. Suggested V1 Delivery Plan
+
+1. Data model and migration for `memory_executor_tasks`.
+2. Base-agent integration hooks for optional cron-capable agents.
+3. `memory_executor` core service and due-task evaluator.
+4. memoryd enqueue bridge (provider/model/tools/type overrides).
+5. WebUI tab and backend CRUD API.
+6. Template loader and initial 2 templates.
+7. Tests: due-check logic, todo-json status rules, tools forwarding, API CRUD.
+
+## 15. Open TBD List (Consolidated)
+
+- TBD: canonical task schema contract for `memory_executor_tasks`.
+	Problem:
+	- proposal still says `id bigint generated always as identity` and `prio int not null default 8`;
+	- implementation now uses `id UUID` and does not store task-level `prio` in `memory_executor_tasks`.
+	Needs decision:
+	- update proposal to match UUID + global memoryd priority, or reintroduce bigint/prio in code and DB migrations.
+
+- TBD: canonical template storage path for Memory Executor templates.
+	Problem:
+	- proposal says templates are loaded from agent folder `templates/*.md`;
+	- current WebUI implementation loads templates from `agent_files/*.md`.
+	Needs decision:
+	- choose one canonical path and align both code and proposal; if migration is needed, define backward-compatibility behavior.
+
+- TBD: exact WebUI visibility rule for Memory Executor tab.
+	Problem:
+	- proposal says the panel must be hidden when agent folder/config is absent;
+	- current fix hides the tab when `memory_executor` code is not discovered, but does not hide it merely because the agent is disabled by config.
+	Needs decision:
+	- confirm whether the tab should be visible for disabled-but-installed agent configurations, or hidden whenever the agent is not runnable.
+
+- TBD: MUID policy.
+    Problem:
+    We need to make tasks not linker with a particular MUID
+    The task must be abled to work in all muids from the ENVID
+    ideally, it should iterate all available muids in the scope
+    maybe we also need a cross-muid mechanic

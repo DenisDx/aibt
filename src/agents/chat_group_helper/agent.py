@@ -54,7 +54,7 @@ class ChatGroupHelperAgent(AgentBase):
         llm_messages = self._build_llm_messages(query, ctx)
         llm_ctx = {**ctx, "messages": llm_messages}
         result = await super().handle(query, context=llm_ctx)
-        text = self._extract_reply_text(result.get("result", ""))
+        text = str(result.get("result", "") or "").strip()
 
         if self._is_no_reply_output(text):
             decision = {"action": "ignore", "reason": "llm_no_reply", "unsolicited": False}
@@ -80,6 +80,11 @@ class ChatGroupHelperAgent(AgentBase):
         result["result"] = text
         result["decision"] = decision
         return result
+
+    async def _postprocess_result(self, result: Any, *, query: str, context: dict[str, Any], envid: str | None) -> Any:
+        """Normalize model output text via shared AgentBase postprocess hook."""
+
+        return self._extract_reply_text(result)
 
     @staticmethod
     def _extract_reply_text(raw_result: Any) -> str:

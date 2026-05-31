@@ -25,6 +25,11 @@ let _memorydRecords = [];
 let _memorydSelectedRecordId = '';
 let _memorydSelectedTypes = [];
 let _memorydCurrentEnvid = '';
+let _memoryExecutorTasks = [];
+let _memoryExecutorSelectedId = '';
+let _memoryExecutorTemplates = [];
+let _memoryExecutorSplitterReady = false;
+let _memoryExecutorEnvidItems = [];
 let _agentLogItems = [];
 let _agentLogSelectedId = '';
 let _agentLogRawVisible = false;
@@ -103,11 +108,26 @@ function showPage(name) {
   } else if (name === 'memoryd') {
     _closeWs();
     loadMemorydPage();
+  } else if (name === 'memoryexecutor') {
+    _closeWs();
+    loadMemoryExecutorPage();
   } else if (name === 'langgraph') {
     _closeWs();
     loadLangGraphPage();
   } else {
     _closeWs();
+  }
+}
+
+function updateFeatureTabs(capabilities = {}) {
+  const memoryExecutorEnabled = capabilities?.memory_executor !== false;
+  const memoryExecutorTab = document.getElementById('nav-tab-memoryexecutor');
+  const memoryExecutorPage = document.getElementById('page-memoryexecutor');
+  if (memoryExecutorTab) {
+    memoryExecutorTab.style.display = memoryExecutorEnabled ? '' : 'none';
+  }
+  if (memoryExecutorPage && !memoryExecutorEnabled && memoryExecutorPage.classList.contains('active')) {
+    showPage('dashboard');
   }
 }
 
@@ -354,6 +374,7 @@ async function logout() {
 async function loadDashboard() {
   try {
     const s = await apiGet('/api/status');
+    updateFeatureTabs(s.capabilities || {});
     _updateServiceBadge(s.service_state);
     const cardEl = document.getElementById('card-service');
     if (cardEl) {
@@ -1156,6 +1177,512 @@ async function memorydSaveSelectedRecord() {
   } catch (e) {
     if (msg) msg.textContent = 'Save error: ' + (e.message || e);
   }
+}
+
+// ── MemoryExecutor page ───────────────────────────────────────────────────
+
+async function loadMemoryExecutorPage(force = false) {
+  const meta = document.getElementById('memory-executor-meta');
+  try {
+    setupMemoryExecutorSplitter();
+    await loadMemoryExecutorEnvidSelect();
+    await loadMemoryExecutorTemplates();
+    await loadMemoryExecutorTasks();
+    if (force || document.getElementById('page-memoryexecutor')?.classList.contains('active')) {
+      renderMemoryExecutorTaskList();
+      renderMemoryExecutorSelectedTask();
+    }
+    if (meta) {
+      meta.textContent = `Tasks: ${_memoryExecutorTasks.length}`;
+    }
+  } catch (e) {
+    if (meta) meta.textContent = 'MemoryExecutor error: ' + (e.message || e);
+  }
+}
+
+async function loadMemoryExecutorEnvidSelect() {
+  const sel = document.getElementById('memory-executor-envid-select');
+  const filterInput = document.getElementById('memory-executor-envid-filter');
+  if (!sel) return;
+
+  const prevSelected = String(sel.value || '').trim();
+  const prevFilter = String(filterInput?.value || '').trim();
+  const data = await apiGet('/api/memoryd/envids');
+  _memoryExecutorEnvidItems = Array.isArray(data.items) ? data.items : [];
+
+  sel.innerHTML = '';
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '(select envid)';
+  sel.appendChild(emptyOpt);
+
+  _memoryExecutorEnvidItems.forEach((item) => {
+    const envid = String(item.envid || '').trim();
+    if (!envid) return;
+    const opt = document.createElement('option');
+    opt.value = envid;
+    opt.textContent = `${item.title || envid}${item.enabled ? ' · on' : ' · off'}`;
+    sel.appendChild(opt);
+  });
+
+  const availableValues = Array.from(sel.options).map((o) => String(o.value || ''));
+  if (prevSelected && availableValues.includes(prevSelected)) {
+    sel.value = prevSelected;
+  } else if (prevFilter && availableValues.includes(prevFilter)) {
+    sel.value = prevFilter;
+  } else {
+    sel.value = '';
+  }
+}
+
+function memoryExecutorApplyEnvidFromSelect() {
+  const sel = document.getElementById('memory-executor-envid-select');
+  const filterInput = document.getElementById('memory-executor-envid-filter');
+  if (!sel || !filterInput) return;
+  filterInput.value = String(sel.value || '').trim();
+  loadMemoryExecutorPage(true);
+}
+
+function memoryExecutorSetSelectValue(selectEl, value, labelIfMissing = '') {
+  if (!selectEl) return;
+  const wanted = String(value || '').trim();
+  const options = Array.from(selectEl.options || []);
+  const found = options.find((o) => String(o.value || '') === wanted);
+  if (found) {
+    selectEl.value = wanted;
+    return;
+  }
+  if (wanted) {
+    const opt = document.createElement('option');
+    opt.value = wanted;
+    opt.textContent = labelIfMissing || wanted;
+    selectEl.appendChild(opt);
+    selectEl.value = wanted;
+  } else {
+    selectEl.value = '';
+  }
+}
+
+function memoryExecutorRenderAllowedTypesHint() {
+  const hintEl = document.getElementById('memory-executor-types-hint');
+  const envidSel = document.getElementById('memory-executor-field-envid-select');
+  if (!hintEl) return;
+
+  const envid = String(envidSel?.value || '').trim();
+  const item = _memoryExecutorEnvidItems.find((x) => String(x.envid || '').trim() === envid) || null;
+  const contextTypes = Array.isArray(item?.memory_executor_context_types) && item.memory_executor_context_types.length
+    ? item.memory_executor_context_types.map((t) => String(t || '').trim()).filter(Boolean)
+    : (Array.isArray(item?.types) && item.types.length
+      ? item.types.map((t) => String(t || '').trim()).filter(Boolean)
+      : ['episodic', 'semantic', 'summaries', 'profiles']);
+  const updateTypes = Array.isArray(item?.memory_executor_update_types) && item.memory_executor_update_types.length
+    ? item.memory_executor_update_types.map((t) => String(t || '').trim()).filter(Boolean)
+    : ['episodic', 'semantic', 'summaries', 'profiles'];
+  const scopeText = envid ? `envid "${envid}"` : 'base config';
+  hintEl.innerHTML =
+    `Allowed Context types for ${escapeHtml(scopeText)}: ${escapeHtml(contextTypes.join(', '))}<br>` +
+    `Allowed Update types for ${escapeHtml(scopeText)}: ${escapeHtml(updateTypes.join(', '))}`;
+}
+
+async function memoryExecutorLoadEditorEnvidSelect(preferredEnvid = '') {
+  const sel = document.getElementById('memory-executor-field-envid-select');
+  if (!sel) return;
+
+  if (!_memoryExecutorEnvidItems.length) {
+    const data = await apiGet('/api/memoryd/envids');
+    _memoryExecutorEnvidItems = Array.isArray(data.items) ? data.items : [];
+  }
+
+  const prev = String(sel.value || '').trim();
+  sel.innerHTML = '';
+  const baseOpt = document.createElement('option');
+  baseOpt.value = '';
+  baseOpt.textContent = '(base config)';
+  sel.appendChild(baseOpt);
+
+  _memoryExecutorEnvidItems.forEach((item) => {
+    const envid = String(item.envid || '').trim();
+    if (!envid) return;
+    const opt = document.createElement('option');
+    opt.value = envid;
+    opt.textContent = `${item.title || envid}${item.enabled ? ' · on' : ' · off'}`;
+    sel.appendChild(opt);
+  });
+
+  const candidate = String(preferredEnvid || prev || '').trim();
+  memoryExecutorSetSelectValue(sel, candidate, candidate);
+  memoryExecutorRenderAllowedTypesHint();
+}
+
+async function memoryExecutorLoadEditorMuids(preferredMuid = '') {
+  const envidSel = document.getElementById('memory-executor-field-envid-select');
+  const muidSel = document.getElementById('memory-executor-field-muid-select');
+  if (!muidSel) return;
+
+  const envid = String(envidSel?.value || '').trim();
+  const qs = envid ? `?envid=${encodeURIComponent(envid)}` : '';
+  const data = await apiGet('/api/memoryd/muids' + qs);
+  const items = Array.isArray(data.items) ? data.items : [];
+  const defaultMuid = String(data.default_muid || 'default').trim() || 'default';
+
+  muidSel.innerHTML = '';
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '(select muid)';
+  muidSel.appendChild(emptyOpt);
+
+  const defOpt = document.createElement('option');
+  defOpt.value = defaultMuid;
+  defOpt.textContent = `(default) ${defaultMuid}`;
+  muidSel.appendChild(defOpt);
+
+  items.forEach((muid) => {
+    const text = String(muid || '').trim();
+    if (!text) return;
+    const opt = document.createElement('option');
+    opt.value = text;
+    opt.textContent = text;
+    muidSel.appendChild(opt);
+  });
+
+  memoryExecutorSetSelectValue(muidSel, preferredMuid, preferredMuid || defaultMuid);
+}
+
+function memoryExecutorApplyEditorEnvidFromSelect() {
+  memoryExecutorRenderAllowedTypesHint();
+  memoryExecutorLoadEditorMuids('').catch(() => {});
+}
+
+function memoryExecutorApplyMuidFromSelect() {
+  const muidSel = document.getElementById('memory-executor-field-muid-select');
+  const muidInput = document.getElementById('memory-executor-field-muid');
+  if (!muidSel || !muidInput) return;
+  const value = String(muidSel.value || '').trim();
+  if (!value) return;
+  muidInput.value = value;
+}
+
+function memoryExecutorSyncEditorEnvidAndMuids(envidValue = '', muidValue = '') {
+  memoryExecutorLoadEditorEnvidSelect(envidValue)
+    .then(() => memoryExecutorLoadEditorMuids(muidValue))
+    .catch(() => {});
+}
+
+async function loadMemoryExecutorTemplates() {
+  const sel = document.getElementById('memory-executor-template-select');
+  if (!sel) return;
+  const prev = sel.value;
+  const data = await apiGet('/api/memory-executor/templates');
+  _memoryExecutorTemplates = Array.isArray(data.items) ? data.items : [];
+  sel.innerHTML = '';
+
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = '(no template)';
+  sel.appendChild(empty);
+
+  _memoryExecutorTemplates.forEach((item) => {
+    const name = String(item.name || '').trim();
+    if (!name) return;
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  }
+}
+
+async function loadMemoryExecutorTasks() {
+  const envidEl = document.getElementById('memory-executor-envid-filter');
+  const envid = String(envidEl?.value || '').trim();
+  const qs = envid ? '?envid=' + encodeURIComponent(envid) : '';
+  const data = await apiGet('/api/memory-executor/tasks' + qs);
+  _memoryExecutorTasks = Array.isArray(data.items) ? data.items : [];
+  if (_memoryExecutorTasks.length) {
+    if (!_memoryExecutorTasks.some(t => String(t.id || '') === String(_memoryExecutorSelectedId || ''))) {
+      _memoryExecutorSelectedId = String(_memoryExecutorTasks[0].id || '');
+    }
+  } else {
+    _memoryExecutorSelectedId = '';
+  }
+}
+
+function renderMemoryExecutorTaskList() {
+  const body = document.getElementById('memory-executor-table-body');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (!_memoryExecutorTasks.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td colspan="8" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No tasks found.</td>';
+    body.appendChild(row);
+    return;
+  }
+
+  _memoryExecutorTasks.forEach((task) => {
+    const id = String(task.id || '');
+    const row = document.createElement('tr');
+    row.style.cursor = 'pointer';
+    row.style.background = id === _memoryExecutorSelectedId ? 'rgba(91,138,247,.12)' : 'transparent';
+    row.onclick = () => {
+      _memoryExecutorSelectedId = id;
+      renderMemoryExecutorTaskList();
+      renderMemoryExecutorSelectedTask();
+    };
+    row.innerHTML =
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.id || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.name || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.envid || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.muid || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.todo_title || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.period_sec ?? ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.execution_policy || 'idle'))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${task.enabled ? 'yes' : 'no'}</td>`;
+    body.appendChild(row);
+  });
+}
+
+function renderMemoryExecutorSelectedTask() {
+  const selected = _memoryExecutorTasks.find(t => String(t.id || '') === String(_memoryExecutorSelectedId || '')) || null;
+  const task = selected || memoryExecutorNewTaskTemplate();
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = value == null ? '' : String(value);
+  };
+
+  const setCheck = (id, value) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = Boolean(value);
+  };
+
+  const idTextEl = document.getElementById('memory-executor-field-id-text');
+  if (idTextEl) {
+    idTextEl.textContent = task.id ? String(task.id) : '(new task)';
+  }
+  setText('memory-executor-field-name', task.name || '');
+  setText('memory-executor-field-muid', task.muid || '');
+  setText('memory-executor-field-period', task.period_sec == null ? '' : task.period_sec);
+  setText('memory-executor-field-todo-title', task.todo_title || '');
+  setText('memory-executor-field-provider', task.provider || '');
+  setText('memory-executor-field-model', task.model || '');
+  setText('memory-executor-field-enqueue-key', task.enqueue_key || '');
+  setText('memory-executor-field-request-text', task.request_text || '');
+  setText('memory-executor-field-tools', Array.isArray(task.tools) ? task.tools.join(',') : '');
+  setText('memory-executor-field-context-types', Array.isArray(task.context_types) ? task.context_types.join(',') : '');
+  setText('memory-executor-field-update-types', Array.isArray(task.update_types) ? task.update_types.join(',') : '');
+  setText('memory-executor-field-policy', task.execution_policy || 'idle');
+  setCheck('memory-executor-field-enabled', task.enabled !== false);
+  memoryExecutorSyncEditorEnvidAndMuids(String(task.envid || '').trim(), String(task.muid || '').trim());
+}
+
+function memoryExecutorNewTaskTemplate() {
+  return {
+    name: 'task-name',
+    enabled: true,
+    envid: null,
+    muid: 'default',
+    period_sec: 3600,
+    todo_title: null,
+    request_text: 'Summarize recent dialogue and update semantic/profile memories.',
+    provider: null,
+    model: null,
+    tools: null,
+    context_types: ['semantic', 'profiles', 'todo'],
+    update_types: ['semantic', 'profiles'],
+    execution_policy: 'idle',
+    enqueue_key: null
+  };
+}
+
+function memoryExecutorPrepareNewTask() {
+  _memoryExecutorSelectedId = '';
+  renderMemoryExecutorTaskList();
+  renderMemoryExecutorSelectedTask();
+}
+
+function memoryExecutorApplyTemplate() {
+  const sel = document.getElementById('memory-executor-template-select');
+  const textEl = document.getElementById('memory-executor-field-request-text');
+  const msg = document.getElementById('memory-executor-msg');
+  if (!sel || !textEl) return;
+
+  const selectedName = String(sel.value || '').trim();
+  if (!selectedName) {
+    if (msg) msg.textContent = 'Select template first.';
+    return;
+  }
+  const tpl = _memoryExecutorTemplates.find(item => String(item.name || '').trim() === selectedName);
+  if (!tpl) {
+    if (msg) msg.textContent = 'Template not found.';
+    return;
+  }
+  textEl.value = String(tpl.text || '');
+  if (msg) msg.textContent = `Template ${selectedName} copied into task.request_text`;
+}
+
+function memoryExecutorReadTaskFromForm() {
+  const readText = (id) => {
+    const el = document.getElementById(id);
+    return String(el?.value || '').trim();
+  };
+  const readList = (id) => readText(id).split(',').map(v => v.trim()).filter(Boolean);
+  const readOptionalText = (id) => {
+    const v = readText(id);
+    return v ? v : null;
+  };
+
+  const enabledEl = document.getElementById('memory-executor-field-enabled');
+  const periodRaw = readText('memory-executor-field-period');
+  const period = periodRaw === '' ? null : Number(periodRaw);
+  const idText = String(_memoryExecutorSelectedId || '').trim();
+  const envidSel = document.getElementById('memory-executor-field-envid-select');
+
+  const task = {
+    name: readText('memory-executor-field-name'),
+    enabled: Boolean(enabledEl?.checked),
+    envid: String(envidSel?.value || '').trim() || null,
+    muid: readText('memory-executor-field-muid'),
+    period_sec: Number.isFinite(period) && period !== null ? Math.max(0, Math.trunc(period)) : null,
+    todo_title: readOptionalText('memory-executor-field-todo-title'),
+    request_text: String(document.getElementById('memory-executor-field-request-text')?.value || ''),
+    provider: readOptionalText('memory-executor-field-provider'),
+    model: readOptionalText('memory-executor-field-model'),
+    tools: (() => {
+      const text = readText('memory-executor-field-tools');
+      if (!text) return null;
+      return text.split(',').map(v => v.trim()).filter(Boolean);
+    })(),
+    context_types: readList('memory-executor-field-context-types'),
+    update_types: readList('memory-executor-field-update-types'),
+    execution_policy: readText('memory-executor-field-policy') || 'idle',
+    enqueue_key: readOptionalText('memory-executor-field-enqueue-key'),
+  };
+  if (idText) task.id = idText;
+  return task;
+}
+
+async function memoryExecutorSaveTask() {
+  const msg = document.getElementById('memory-executor-msg');
+  const task = memoryExecutorReadTaskFromForm();
+
+  if (!task.name || !task.muid || !String(task.request_text || '').trim()) {
+    if (msg) msg.textContent = 'Required fields: name, muid, request_text';
+    return;
+  }
+
+  try {
+    if (task.id) {
+      await fetch('/api/memory-executor/tasks/' + encodeURIComponent(String(task.id)), {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task }),
+      }).then(async (r) => {
+        if (!r.ok) {
+          let detail = '';
+          try {
+            const payload = await r.json();
+            detail = payload?.detail ? ` (${payload.detail})` : '';
+          } catch (_) {}
+          throw new Error(`PUT /api/memory-executor/tasks/${encodeURIComponent(String(task.id))} -> ${r.status}${detail}`);
+        }
+        return r.json();
+      });
+      if (msg) msg.textContent = `Updated ${task.id}`;
+    } else {
+      const res = await apiPost('/api/memory-executor/tasks', { task });
+      if (msg) msg.textContent = `Created ${res.item?.id || 'task'}`;
+      if (res.item?.id) _memoryExecutorSelectedId = String(res.item.id);
+    }
+    await loadMemoryExecutorTasks();
+    renderMemoryExecutorTaskList();
+    renderMemoryExecutorSelectedTask();
+  } catch (e) {
+    if (msg) msg.textContent = 'Save error: ' + (e.message || e);
+  }
+}
+
+async function memoryExecutorDeleteTask() {
+  const selected = _memoryExecutorTasks.find(t => String(t.id || '') === String(_memoryExecutorSelectedId || '')) || null;
+  const msg = document.getElementById('memory-executor-msg');
+  if (!selected) {
+    if (msg) msg.textContent = 'No selected task.';
+    return;
+  }
+  if (!confirm(`Delete memory executor task ${selected.id}?`)) return;
+  try {
+    await apiDelete('/api/memory-executor/tasks/' + encodeURIComponent(String(selected.id)));
+    if (msg) msg.textContent = `Deleted ${selected.id}`;
+    _memoryExecutorSelectedId = '';
+    await loadMemoryExecutorTasks();
+    renderMemoryExecutorTaskList();
+    renderMemoryExecutorSelectedTask();
+  } catch (e) {
+    if (msg) msg.textContent = 'Delete error: ' + (e.message || e);
+  }
+}
+
+async function memoryExecutorRunNow() {
+  const envidEl = document.getElementById('memory-executor-envid-filter');
+  const msg = document.getElementById('memory-executor-msg');
+  const envid = String(envidEl?.value || '').trim() || null;
+  if (msg) msg.textContent = 'Running memory_executor hooks...';
+  try {
+    const res = await apiPost('/api/memory-executor/tasks/run', { envid });
+    if (msg) msg.textContent = `Hooks: called=${res.called || 0}, failed=${res.failed || 0}`;
+  } catch (e) {
+    if (msg) msg.textContent = 'Run error: ' + (e.message || e);
+  }
+}
+
+function setupMemoryExecutorSplitter() {
+  if (_memoryExecutorSplitterReady) return;
+  const layout = document.getElementById('memory-executor-layout');
+  const splitter = document.getElementById('memory-executor-splitter');
+  const right = document.querySelector('.memory-executor-right');
+  if (!layout || !splitter || !right) return;
+
+  let dragging = false;
+
+  const applyWidthFromX = (clientX) => {
+    const rect = layout.getBoundingClientRect();
+    const total = rect.width;
+    if (total <= 0) return;
+    const rightWidth = Math.max(280, Math.min(total * 0.75, rect.right - clientX));
+    const rightPct = (rightWidth / total) * 100;
+    right.style.flexBasis = `${rightPct.toFixed(2)}%`;
+  };
+
+  const onMove = (ev) => {
+    if (!dragging) return;
+    applyWidthFromX(ev.clientX);
+  };
+
+  const stopDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    document.body.style.cursor = '';
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', stopDrag);
+  };
+
+  splitter.addEventListener('mousedown', (ev) => {
+    dragging = true;
+    splitter.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', stopDrag);
+    ev.preventDefault();
+  });
+
+  _memoryExecutorSplitterReady = true;
 }
 
 function _memoryHighlightTerms() {

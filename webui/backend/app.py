@@ -131,6 +131,11 @@ class MemorydEnqueueRequest(BaseModel):
     final_response: str
     muid: str | None = None
     caller_tag: str | None = None
+    request_text: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    tools: list[Any] | None = None
+    context_types: list[str] | None = None
     types: list[str] | None = None
 
 
@@ -140,6 +145,14 @@ class MemorydRunRequest(BaseModel):
 
 class MemorydUpsertRecordRequest(BaseModel):
     payload: dict[str, Any]
+
+
+class MemoryExecutorTaskRequest(BaseModel):
+    task: dict[str, Any]
+
+
+class MemoryExecutorRunRequest(BaseModel):
+    envid: str | None = None
 
 
 # ── WebUI server ──────────────────────────────────────────────────────────────
@@ -304,6 +317,89 @@ class WebUIServer:
 
         effective = build_effective_config(self.config, envid)
         return get_memoryd_service(self.root_dir, effective)
+
+    @staticmethod
+    def _memoryd_enabled_types(effective_config: dict[str, Any]) -> list[str]:
+        """Return enabled memoryd item types from effective config."""
+
+        memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+        items_cfg = memoryd_cfg.get("items", {}) if isinstance(memoryd_cfg, dict) else {}
+        out: list[str] = []
+        if not isinstance(items_cfg, dict):
+            return out
+        for type_name, type_cfg in items_cfg.items():
+            if isinstance(type_cfg, dict) and bool(type_cfg.get("enabled", False)):
+                clean = str(type_name).strip().lower()
+                if clean:
+                    out.append(clean)
+        return sorted(set(out))
+
+    @staticmethod
+    def _memoryd_auto_writable_types(effective_config: dict[str, Any]) -> list[str]:
+        """Return enabled memoryd types allowed for auto enqueue writes."""
+
+        memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+        items_cfg = memoryd_cfg.get("items", {}) if isinstance(memoryd_cfg, dict) else {}
+        out: list[str] = []
+        if not isinstance(items_cfg, dict):
+            return out
+        for type_name, type_cfg in items_cfg.items():
+            if not isinstance(type_cfg, dict):
+                continue
+            if not bool(type_cfg.get("enabled", False)):
+                continue
+            if bool(type_cfg.get("manual_only", False)) or bool(type_cfg.get("external_writer", False)):
+                continue
+            clean = str(type_name).strip().lower()
+            if clean:
+                out.append(clean)
+        return sorted(set(out))
+
+    @staticmethod
+    def _resolve_agent_memoryd_types(
+        effective_config: dict[str, Any],
+        *,
+        agent_id: str,
+        key: str,
+        default_types: list[str],
+        allowed_types: list[str],
+    ) -> list[str]:
+        """Resolve one agent memoryd type list from effective config with filtering."""
+
+        agents_cfg = effective_config.get("agents", {}) if isinstance(effective_config, dict) else {}
+        items_cfg = agents_cfg.get("items", {}) if isinstance(agents_cfg, dict) else {}
+        agent_cfg = items_cfg.get(agent_id, {}) if isinstance(items_cfg, dict) else {}
+        memoryd_cfg = agent_cfg.get("memoryd", {}) if isinstance(agent_cfg, dict) else {}
+        raw = memoryd_cfg.get(key) if isinstance(memoryd_cfg, dict) else None
+        if raw is None:
+            requested = list(default_types)
+        elif isinstance(raw, list):
+            requested = [str(item).strip().lower() for item in raw if str(item).strip()]
+        else:
+            requested = list(default_types)
+        allowed = {str(x).strip().lower() for x in allowed_types if str(x).strip()}
+        return sorted(item for item in set(requested) if item in allowed)
+
+    def _memory_executor_store_for_envid(self, envid: str | None = None):
+        """Return memory_executor store bound to effective config for one envid."""
+
+        if not self._memory_executor_available():
+            raise RuntimeError("memory_executor agent is not available")
+
+        from agents.memory_executor.agent import MemoryExecutorStore
+
+        effective = build_effective_config(self.config, envid)
+        store = MemoryExecutorStore(self.root_dir, effective)
+        store.ensure_schema()
+        return store
+
+    def _memory_executor_available(self) -> bool:
+        """Return whether memory_executor code is discovered in this runtime."""
+
+        agent_classes = getattr(self.orchestrator, "agent_classes", None)
+        if agent_classes is None:
+            return True
+        return "memory_executor" in agent_classes
 
     def _inflight_task_stats(self) -> dict[str, int]:
         """Count started-but-not-finished orchestrator tasks.
@@ -661,6 +757,9 @@ class WebUIServer:
                     "documents": mem_docs,
                 },
                 "processing": processing,
+                "capabilities": {
+                    "memory_executor": self._memory_executor_available(),
+                },
             }
 
         @app.get("/api/logs")
@@ -1020,7 +1119,32 @@ class WebUIServer:
         async def api_memoryd_envids(session: dict = Depends(require)):
             try:
                 svc = self._memoryd_service_for_envid(None)
-                return {"ok": True, "items": svc.list_envids()}
+                rows = svc.list_envids()
+                enriched: list[dict[str, Any]] = []
+                for row in rows:
+                    envid = str(row.get("envid") or "").strip()
+                    effective = build_effective_config(self.config, envid or None)
+                    enabled = self._memoryd_enabled_types(effective)
+                    auto_writable = self._memoryd_auto_writable_types(effective)
+                    context_types = self._resolve_agent_memoryd_types(
+                        effective,
+                        agent_id="memory_executor",
+                        key="context_types",
+                        default_types=enabled,
+                        allowed_types=enabled,
+                    )
+                    update_types = self._resolve_agent_memoryd_types(
+                        effective,
+                        agent_id="memory_executor",
+                        key="update_types",
+                        default_types=auto_writable,
+                        allowed_types=auto_writable,
+                    )
+                    enriched_row = dict(row)
+                    enriched_row["memory_executor_context_types"] = context_types
+                    enriched_row["memory_executor_update_types"] = update_types
+                    enriched.append(enriched_row)
+                return {"ok": True, "items": enriched}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
@@ -1070,6 +1194,11 @@ class WebUIServer:
                     final_response=body.final_response,
                     muid=body.muid,
                     caller_tag=body.caller_tag,
+                    request_text=body.request_text,
+                    provider=body.provider,
+                    model=body.model,
+                    tools=body.tools,
+                    context_types=body.context_types,
                     types=body.types,
                 )
                 return {"ok": True, **result}
@@ -1117,6 +1246,115 @@ class WebUIServer:
                 svc = self._memoryd_service_for_envid(None)
                 envids = svc.list_envids()
                 return {"ok": True, "items": envids}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ── MemoryExecutor API ─────────────────────────────────────────────
+
+        @app.get("/api/memory-executor/templates")
+        async def api_memory_executor_templates(session: dict = Depends(require)):
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                templates_dir = Path(self.root_dir) / "agent_files"
+                if not templates_dir.is_dir():
+                    return {"ok": True, "items": []}
+                items: list[dict[str, Any]] = []
+                for path in sorted(templates_dir.glob("*.md")):
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        text = ""
+                    items.append(
+                        {
+                            "name": path.name,
+                            "size": path.stat().st_size,
+                            "text": text,
+                        }
+                    )
+                return {"ok": True, "items": items}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memory-executor/tasks")
+        async def api_memory_executor_tasks(
+            envid: str = "",
+            limit: int = 200,
+            offset: int = 0,
+            session: dict = Depends(require),
+        ):
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                store = self._memory_executor_store_for_envid(envid.strip() or None)
+                page = store.list_tasks(
+                    envid=envid.strip() if envid.strip() else None,
+                    limit=max(1, min(500, int(limit))),
+                    offset=max(0, int(offset)),
+                )
+                return {"ok": True, **page}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory-executor/tasks")
+        async def api_memory_executor_create_task(body: MemoryExecutorTaskRequest, session: dict = Depends(require)):
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                envid = str(body.task.get("envid") or "").strip() or None
+                store = self._memory_executor_store_for_envid(envid)
+                item = store.create_task(body.task)
+                return {"ok": True, "item": item}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.put("/api/memory-executor/tasks/{task_id}")
+        async def api_memory_executor_update_task(task_id: str, body: MemoryExecutorTaskRequest, session: dict = Depends(require)):
+            clean_id = task_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="task_id is required")
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                envid = str(body.task.get("envid") or "").strip() or None
+                store = self._memory_executor_store_for_envid(envid)
+                item = store.update_task(clean_id, body.task)
+                if item is None:
+                    raise HTTPException(status_code=404, detail="task not found")
+                return {"ok": True, "item": item}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.delete("/api/memory-executor/tasks/{task_id}")
+        async def api_memory_executor_delete_task(task_id: str, session: dict = Depends(require)):
+            clean_id = task_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="task_id is required")
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                store = self._memory_executor_store_for_envid(None)
+                deleted = store.delete_task(clean_id)
+                return {"ok": True, "deleted": bool(deleted)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory-executor/tasks/run")
+        async def api_memory_executor_run_tasks(body: MemoryExecutorRunRequest | None = None, session: dict = Depends(require)):
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                envid = str(body.envid).strip() if body and body.envid is not None else ""
+                stats = await self.orchestrator.run_cron_tick_hooks(
+                    runtime={"source": "webui.memory_executor.run", "root_dir": self.root_dir, "envid": envid or None}
+                )
+                return {"ok": True, **stats}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
@@ -1212,6 +1450,19 @@ class WebUIServer:
 
     async def start(self) -> None:
         """Start uvicorn. Blocks until the server exits."""
+        try:
+            init_stats = await self.orchestrator.run_init_hooks(
+                runtime={"source": "webui.start", "root_dir": self.root_dir}
+            )
+            if init_stats.get("called") or init_stats.get("failed"):
+                log(
+                    "webui",
+                    "info",
+                    f"Agent on_init hooks: called={init_stats.get('called', 0)} failed={init_stats.get('failed', 0)}",
+                )
+        except Exception as e:
+            log("webui", "error", f"Failed to run agent on_init hooks: {e}\n{traceback.format_exc()}")
+
         cfg = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         self._server = uvicorn.Server(cfg)
         log("webui", "info", f"Starting WebUI on {self.host}:{self.port}")
@@ -1261,6 +1512,19 @@ class WebUIServer:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         self._adapter_tasks.clear()
+
+        try:
+            shutdown_stats = await self.orchestrator.run_shutdown_hooks(
+                runtime={"source": "webui.stop", "root_dir": self.root_dir}
+            )
+            if shutdown_stats.get("called") or shutdown_stats.get("failed"):
+                log(
+                    "webui",
+                    "info",
+                    f"Agent on_shutdown hooks: called={shutdown_stats.get('called', 0)} failed={shutdown_stats.get('failed', 0)}",
+                )
+        except Exception as e:
+            log("webui", "error", f"Failed to run agent on_shutdown hooks: {e}\n{traceback.format_exc()}")
 
         if self._server:
             self._server.should_exit = True

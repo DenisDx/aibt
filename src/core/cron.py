@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Periodic task runner. Invoked by crontab; runs within the full app environment."""
 from __future__ import annotations
+import asyncio
 import sys
 import os
 import fcntl
@@ -16,6 +17,7 @@ from core.config import load_config
 from core.logging_utils import init_logging, log
 from memory.cron_tasks import run_memory_cron
 from memoryd import run_memoryd_cron
+from orchestrator.orchestrator import AgentOrchestrator
 
 
 # Timestamp pattern embedded in log lines: ]YYYY-MM-DD HH:MM:SS.mmm
@@ -171,6 +173,20 @@ def main() -> None:
                     )
         except Exception as e:
             log("cron", "error", f"Memoryd cron error: {e}")
+
+        try:
+            orchestrator = AgentOrchestrator(config, init_adapters=False)
+            hook_stats = asyncio.run(
+                orchestrator.run_cron_tick_hooks(runtime={"source": "core.cron", "root_dir": _ROOT_DIR})
+            )
+            if hook_stats.get("called") or hook_stats.get("failed"):
+                log(
+                    "cron",
+                    "info",
+                    f"Agent on_cron_tick hooks: called={hook_stats.get('called', 0)} failed={hook_stats.get('failed', 0)}",
+                )
+        except Exception as e:
+            log("cron", "error", f"Agent cron hook dispatch error: {e}")
 
     except Exception as e:
         log("cron", "error", f"Cron error: {e}")
