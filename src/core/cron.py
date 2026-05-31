@@ -15,6 +15,7 @@ if _SRC_DIR not in sys.path:
 from core.config import load_config
 from core.logging_utils import init_logging, log
 from memory.cron_tasks import run_memory_cron
+from memoryd import run_memoryd_cron
 
 
 # Timestamp pattern embedded in log lines: ]YYYY-MM-DD HH:MM:SS.mmm
@@ -152,6 +153,24 @@ def main() -> None:
                     )
         except Exception as e:
             log("cron", "error", f"Memory cron error: {e}")
+
+        try:
+            memoryd_result = run_memoryd_cron(_ROOT_DIR, config)
+            if memoryd_result.get("enabled"):
+                queue = memoryd_result.get("queue", {})
+                if queue.get("started") or queue.get("done") or queue.get("failed") or queue.get("pruned"):
+                    log(
+                        "cron",
+                        "info",
+                        (
+                            "Memoryd cron done: "
+                            f"picked={queue.get('picked', 0)} started={queue.get('started', 0)} "
+                            f"done={queue.get('done', 0)} failed={queue.get('failed', 0)} "
+                            f"pruned={queue.get('pruned', 0)} skipped={queue.get('skipped', 0)}"
+                        ),
+                    )
+        except Exception as e:
+            log("cron", "error", f"Memoryd cron error: {e}")
 
     except Exception as e:
         log("cron", "error", f"Cron error: {e}")

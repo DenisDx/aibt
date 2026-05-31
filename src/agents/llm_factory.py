@@ -6,6 +6,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from core.llm_wiretap import get_async_http_client
+from core.llm_wiretap import get_sync_http_client
 
 
 _UNSET = object()
@@ -62,5 +63,6 @@ def build_llm(
         base_url=base_url,
         temperature=0,
         model_kwargs=model_kwargs,
+        http_client=get_sync_http_client(),
         http_async_client=get_async_http_client(),
     )

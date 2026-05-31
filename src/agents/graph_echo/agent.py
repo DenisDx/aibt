@@ -9,9 +9,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
 from agents.llm_factory import build_llm
+from core.envid_runtime import build_effective_config
 from core.logging_utils import log
 from memory.tools import MemoryTools
 from memory.langgraph_runtime import build_langgraph_runtime
+from memoryd import get_memoryd_service
 
 
 class GraphEchoState(TypedDict, total=False):
@@ -133,6 +135,7 @@ class GraphEchoAgent:
         profile_id = str(ctx.get("chat_id") or ctx.get("user_id") or "").strip() or None
         memory_context = ""
         memory_meta: dict[str, Any] = {"semantic_hits": 0, "doc_hits": 0, "summary_hit": False, "procedural_items": 0}
+        memoryd_meta: dict[str, Any] = {"enabled": False, "selected_records_count": 0, "task_id": "", "types": []}
         try:
             semantic_hits = self.memory_tools.recall_memory(self.name, query, limit=5, envid=envid)
             doc_hits = self.memory_tools.search_docs(query=query, corpora=self._allowed_corpora(), limit=6)
@@ -149,6 +152,26 @@ class GraphEchoAgent:
                 memory_context = self._format_memory_context(semantic_hits, doc_hits, procedural_memory, session_summary)
         except Exception as e:
             log("agents", "warning", f"Memory enrichment skipped for agent={self.name}: {e}")
+
+        try:
+            effective_config = build_effective_config(self.app_config, envid)
+            memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+            if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service.initialize()
+                muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
+                memoryd_result = memoryd_service.get_context(muid, types=None, render="markdown")
+                memoryd_text = str(memoryd_result.get("text") or "").strip()
+                if memoryd_text:
+                    memory_context = "\n\n".join(part for part in (memory_context, "Memoryd context:\n" + memoryd_text) if part)
+                memoryd_meta = {
+                    "enabled": True,
+                    "selected_records_count": int((memoryd_result.get("metadata") or {}).get("selected_records_count", 0) or 0),
+                    "task_id": "",
+                    "types": list((memoryd_result.get("metadata") or {}).get("types", []) or []),
+                }
+        except Exception as e:
+            log("agents", "warning", f"Memoryd enrichment skipped for agent={self.name}: {e}")
 
         final = await self.graph.ainvoke(
             {
@@ -179,7 +202,28 @@ class GraphEchoAgent:
         except Exception as e:
             log("agents", "warning", f"Failed to record episode for agent={self.name}: {e}")
 
-        return {"result": result_text, "memory": memory_meta}
+        try:
+            effective_config = build_effective_config(self.app_config, envid)
+            memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+            if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service.initialize()
+                muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
+                enqueue_result = memoryd_service.enqueue_update(
+                    source_context={k: v for k, v in ctx.items() if k not in {"memory_context"}},
+                    final_response=str(result_text),
+                    muid=muid,
+                    caller_tag=str(ctx.get("caller_tag") or ctx.get("task_id") or self.name).strip() or None,
+                    types=None,
+                )
+                memoryd_meta.update({
+                    "task_id": str(enqueue_result.get("task_id") or ""),
+                    "types": list(enqueue_result.get("types") or memoryd_meta.get("types") or []),
+                })
+        except Exception as e:
+            log("agents", "warning", f"Memoryd enqueue skipped for agent={self.name}: {e}")
+
+        return {"result": result_text, "memory": memory_meta, "memoryd": memoryd_meta}
 
     def _allowed_corpora(self) -> list[str] | None:
         """Resolve allowed corpora for this agent.

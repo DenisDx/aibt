@@ -31,6 +31,9 @@ class AibtApp:
             self.config = load_config(self.root_dir)
             init_logging(self.config, self.root_dir)
             log("core", "info", f"Config: {self.config.get('title', 'aibt')} / instance: {self.config.get('instance', '?')}")
+            from memoryd import get_memoryd_service
+            memoryd_service = get_memoryd_service(self.root_dir, self.config)
+            memoryd_service.initialize()
         except Exception as e:
             log("core", "critical", f"Config load failed: {e}")
             raise

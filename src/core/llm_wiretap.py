@@ -77,12 +77,34 @@ async def _on_request(request: httpx.Request) -> None:
     _append_raw_line(str(ctx.get("log_path") or ""), raw)
 
 
+def _on_request_sync(request: httpx.Request) -> None:
+    """Sync request hook that writes raw outbound HTTP body as-is."""
+
+    ctx = _CTX.get()
+    if not ctx:
+        return
+
+    raw = _request_body_bytes(request)
+    _append_raw_line(str(ctx.get("log_path") or ""), raw)
+
+
 async def _on_response(response: httpx.Response) -> None:
     ctx = _CTX.get()
     if not ctx:
         return
 
     raw = await response.aread()
+    _append_raw_line(str(ctx.get("log_path") or ""), raw)
+
+
+def _on_response_sync(response: httpx.Response) -> None:
+    """Sync response hook that writes raw inbound HTTP body as-is."""
+
+    ctx = _CTX.get()
+    if not ctx:
+        return
+
+    raw = response.read()
     _append_raw_line(str(ctx.get("log_path") or ""), raw)
 
 
@@ -99,5 +121,18 @@ def get_async_http_client() -> httpx.AsyncClient:
         event_hooks={
             "request": [_on_request],
             "response": [_on_response],
+        },
+    )
+
+
+def get_sync_http_client() -> httpx.Client:
+    """Create a fresh sync HTTP client with request/response wiretap hooks."""
+
+    return httpx.Client(
+        headers={"Accept-Encoding": "identity"},
+        timeout=httpx.Timeout(90.0),
+        event_hooks={
+            "request": [_on_request_sync],
+            "response": [_on_response_sync],
         },
     )

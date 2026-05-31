@@ -123,6 +123,9 @@ systemctl --user restart aibt
 # Run doctor to validate setup
 ./venv/bin/python src/core/doctor.py
 ./venv/bin/python src/core/doctor.py --fix   # auto-fix issues
+
+# Run memoryd smoke test through the memoryd envid
+./venv/bin/python scripts/memoryd_smoke.py --envid envid-telegram-bot2-memoryd --muid smoke
 ```
 
 ## Uninstall

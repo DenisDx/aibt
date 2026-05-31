@@ -19,6 +19,12 @@ let _memoryDocSortBy = 'updated_at';
 let _memoryDocSortDir = 'desc';
 let _memoryFilterTimer = null;
 let _memoryNamespaceTimer = null;
+let _memorydEnvids = [];
+let _memorydMuids = [];
+let _memorydRecords = [];
+let _memorydSelectedRecordId = '';
+let _memorydSelectedTypes = [];
+let _memorydCurrentEnvid = '';
 let _agentLogItems = [];
 let _agentLogSelectedId = '';
 let _agentLogRawVisible = false;
@@ -94,6 +100,9 @@ function showPage(name) {
   } else if (name === 'memory') {
     _closeWs();
     loadMemoryPage();
+  } else if (name === 'memoryd') {
+    _closeWs();
+    loadMemorydPage();
   } else if (name === 'langgraph') {
     _closeWs();
     loadLangGraphPage();
@@ -835,6 +844,317 @@ async function runMemorySearch() {
     out.innerHTML = highlightHtml(JSON.stringify(r.items || [], null, 2), [query]);
   } catch (e) {
     out.textContent = 'Search error: ' + (e.message || e);
+  }
+}
+
+// ── Memoryd page ───────────────────────────────────────────────────────────
+
+async function loadMemorydPage(force = false) {
+  const meta = document.getElementById('memoryd-meta');
+  try {
+    await loadMemorydEnvids();
+    await loadMemorydMuids();
+    await loadMemorydTypes();
+    if (force || document.getElementById('page-memoryd')?.classList.contains('active')) {
+      await loadMemorydRecords();
+    }
+    if (meta) {
+      const envid = document.getElementById('memoryd-envid-select')?.value || '';
+      const muid = document.getElementById('memoryd-muid-select')?.value || '';
+      meta.textContent = `Memoryd ready${envid ? ` · envid=${envid}` : ''}${muid ? ` · muid=${muid}` : ''}`;
+    }
+  } catch (e) {
+    if (meta) meta.textContent = 'Memoryd error: ' + (e.message || e);
+  }
+}
+
+async function loadMemorydEnvids() {
+  const sel = document.getElementById('memoryd-envid-select');
+  if (!sel) return;
+  const prev = sel.value;
+  const data = await apiGet('/api/memoryd/envids');
+  _memorydEnvids = Array.isArray(data.items) ? data.items : [];
+  sel.innerHTML = '';
+
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = '(base config)';
+  sel.appendChild(empty);
+
+  _memorydEnvids.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = String(item.envid || '');
+    opt.textContent = `${item.title || item.envid}${item.enabled ? ' · on' : ' · off'}`;
+    sel.appendChild(opt);
+  });
+
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  }
+  if (!_memorydCurrentEnvid && sel.value) {
+    _memorydCurrentEnvid = sel.value;
+  }
+}
+
+async function loadMemorydMuids() {
+  const sel = document.getElementById('memoryd-muid-select');
+  const envidSel = document.getElementById('memoryd-envid-select');
+  if (!sel) return;
+  const envid = String(envidSel?.value || '').trim();
+  const prev = sel.value;
+  const qs = envid ? `?envid=${encodeURIComponent(envid)}` : '';
+  const data = await apiGet('/api/memoryd/muids' + qs);
+  _memorydMuids = Array.isArray(data.items) ? data.items : [];
+  sel.innerHTML = '';
+
+  const defaultMuid = String(data.default_muid || 'default').trim();
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = defaultMuid;
+  defaultOpt.textContent = `(default) ${defaultMuid}`;
+  sel.appendChild(defaultOpt);
+
+  _memorydMuids.forEach(muid => {
+    const opt = document.createElement('option');
+    opt.value = String(muid || '');
+    opt.textContent = String(muid || '');
+    sel.appendChild(opt);
+  });
+
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  } else if (!sel.value) {
+    sel.value = defaultMuid;
+  }
+}
+
+async function loadMemorydTypes() {
+  const wrap = document.getElementById('memoryd-types');
+  if (!wrap) return;
+  const envidSel = document.getElementById('memoryd-envid-select');
+  const envid = String(envidSel?.value || '').trim();
+  const item = _memorydEnvids.find(x => String(x.envid || '') === envid) || null;
+  const types = Array.isArray(item?.types) && item.types.length ? item.types : ['episodic', 'semantic', 'summaries', 'profiles'];
+  const active = new Set(_memorydSelectedTypes.length ? _memorydSelectedTypes : types);
+  wrap.innerHTML = '';
+  types.forEach(typeName => {
+    const label = document.createElement('label');
+    label.style.display = 'inline-flex';
+    label.style.alignItems = 'center';
+    label.style.gap = '6px';
+    label.style.padding = '4px 8px';
+    label.style.border = '1px solid var(--border)';
+    label.style.borderRadius = '999px';
+    label.style.background = 'rgba(255,255,255,.03)';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = typeName;
+    input.checked = active.has(typeName);
+    input.onchange = () => {
+      const checked = Array.from(wrap.querySelectorAll('input[type=checkbox]:checked')).map(el => String(el.value || '').trim()).filter(Boolean);
+      _memorydSelectedTypes = checked;
+      loadMemorydRecords();
+    };
+    const text = document.createElement('span');
+    text.textContent = typeName;
+    label.appendChild(input);
+    label.appendChild(text);
+    wrap.appendChild(label);
+  });
+  _memorydSelectedTypes = Array.from(wrap.querySelectorAll('input[type=checkbox]:checked')).map(el => String(el.value || '').trim()).filter(Boolean);
+}
+
+async function loadMemorydRecords() {
+  const envidSel = document.getElementById('memoryd-envid-select');
+  const muidSel = document.getElementById('memoryd-muid-select');
+  const out = document.getElementById('memoryd-record-output');
+  if (!muidSel || !out) return;
+  const muid = String(muidSel.value || '').trim();
+  const envid = String(envidSel?.value || '').trim();
+  const types = _memorydSelectedTypes.length ? _memorydSelectedTypes : Array.from(document.querySelectorAll('#memoryd-types input[type=checkbox]:checked')).map(el => String(el.value || '').trim()).filter(Boolean);
+  if (!muid) {
+    out.textContent = 'Select MUID.';
+    return;
+  }
+  const qs = new URLSearchParams();
+  qs.set('muid', muid);
+  if (types.length) qs.set('types', types.join(','));
+  if (envid) qs.set('envid', envid);
+  try {
+    const data = await apiGet('/api/memoryd/records?' + qs.toString());
+    _memorydRecords = Array.isArray(data.items) ? data.items : [];
+    if (_memorydRecords.length) {
+      if (!_memorydRecords.some(r => String(r.id || '') === String(_memorydSelectedRecordId || ''))) {
+        _memorydSelectedRecordId = String(_memorydRecords[0].id || '');
+      }
+    } else {
+      _memorydSelectedRecordId = '';
+    }
+    _renderMemorydRecords();
+    _renderMemorydRecordDetail();
+  } catch (e) {
+    out.textContent = 'Memoryd records error: ' + (e.message || e);
+  }
+}
+
+function _renderMemorydRecords() {
+  const body = document.getElementById('memoryd-record-table-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!_memorydRecords.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td colspan="6" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No records found.</td>';
+    body.appendChild(row);
+    return;
+  }
+  _memorydRecords.forEach(record => {
+    const id = String(record.id || '');
+    const row = document.createElement('tr');
+    row.style.cursor = 'pointer';
+    row.onclick = () => {
+      _memorydSelectedRecordId = id;
+      _renderMemorydRecords();
+      _renderMemorydRecordDetail();
+    };
+    row.style.background = id === _memorydSelectedRecordId ? 'rgba(91,138,247,.12)' : 'transparent';
+    row.innerHTML =
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.id || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.type || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.title || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.importance ?? ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.updated_at || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(record.body || '').slice(0, 120))}</td>`;
+    body.appendChild(row);
+  });
+}
+
+function _renderMemorydRecordDetail() {
+  const out = document.getElementById('memoryd-record-output');
+  const selected = _memorydRecords.find(r => String(r.id || '') === String(_memorydSelectedRecordId || '')) || null;
+  if (!out) return;
+  out.value = selected ? JSON.stringify(selected, null, 2) : '';
+  const meta = document.getElementById('memoryd-record-meta');
+  if (meta) {
+    meta.textContent = selected ? `Selected record ${selected.id}` : 'No record selected.';
+  }
+}
+
+async function memorydRunTick() {
+  const limitEl = document.getElementById('memoryd-run-limit');
+  const msg = document.getElementById('memoryd-msg');
+  const raw = Number(limitEl?.value || 1);
+  const limit = Number.isFinite(raw) ? Math.max(1, Math.min(100, Math.trunc(raw))) : 1;
+  if (limitEl) limitEl.value = String(limit);
+  if (msg) msg.textContent = 'Running...';
+  try {
+    const res = await apiPost('/api/memoryd/tasks/run', { limit });
+    if (msg) msg.textContent = `picked=${res.picked || 0} started=${res.started || 0} done=${res.done || 0} failed=${res.failed || 0} pruned=${res.pruned || 0}`;
+    await loadMemorydPage(true);
+  } catch (e) {
+    if (msg) msg.textContent = 'Run error: ' + (e.message || e);
+  }
+}
+
+async function memorydEnqueueTask() {
+  const envidSel = document.getElementById('memoryd-envid-select');
+  const muidSel = document.getElementById('memoryd-muid-select');
+  const callerTagEl = document.getElementById('memoryd-caller-tag');
+  const srcEl = document.getElementById('memoryd-source-context');
+  const finalEl = document.getElementById('memoryd-final-response');
+  const msg = document.getElementById('memoryd-msg');
+  const envid = String(envidSel?.value || '').trim();
+  const muid = String(muidSel?.value || '').trim();
+  const caller_tag = String(callerTagEl?.value || '').trim() || null;
+  const sourceRaw = String(srcEl?.value || '').trim();
+  const final_response = String(finalEl?.value || '').trim();
+  const types = _memorydSelectedTypes.length ? _memorydSelectedTypes : Array.from(document.querySelectorAll('#memoryd-types input[type=checkbox]:checked')).map(el => String(el.value || '').trim()).filter(Boolean);
+  if (!muid || !sourceRaw || !final_response) {
+    if (msg) msg.textContent = 'muid, source context and final response are required';
+    return;
+  }
+  let source_context;
+  try {
+    source_context = JSON.parse(sourceRaw);
+  } catch (e) {
+    if (msg) msg.textContent = 'Source context must be valid JSON';
+    return;
+  }
+  if (msg) msg.textContent = 'Queueing...';
+  try {
+    const res = await apiPost('/api/memoryd/tasks/enqueue', {
+      source_context: { ...source_context, envid },
+      final_response,
+      muid,
+      caller_tag,
+      types,
+    });
+    if (msg) msg.textContent = `Queued ${res.task_id || 'ok'}`;
+    await loadMemorydPage(true);
+  } catch (e) {
+    if (msg) msg.textContent = 'Enqueue error: ' + (e.message || e);
+  }
+}
+
+async function memorydRefreshEnvids() {
+  const msg = document.getElementById('memoryd-msg');
+  if (msg) msg.textContent = 'Reloading config...';
+  try {
+    const data = await apiPost('/api/memoryd/config/reload');
+    _memorydEnvids = Array.isArray(data.items) ? data.items : [];
+    const sel = document.getElementById('memoryd-envid-select');
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = '';
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = '(base config)';
+      sel.appendChild(empty);
+      _memorydEnvids.forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = String(item.envid || '');
+        opt.textContent = `${item.title || item.envid}${item.enabled ? ' · on' : ' · off'}`;
+        sel.appendChild(opt);
+      });
+      if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+    }
+    await loadMemorydMuids();
+    await loadMemorydTypes();
+    if (msg) msg.textContent = `Config reloaded — ${_memorydEnvids.length} envid(s) found`;
+  } catch (e) {
+    if (msg) msg.textContent = 'Config reload error: ' + (e.message || e);
+  }
+}
+
+async function memorydDeleteSelectedRecord() {
+  const selected = _memorydRecords.find(r => String(r.id || '') === String(_memorydSelectedRecordId || '')) || null;
+  const msg = document.getElementById('memoryd-msg');
+  if (!selected) return;
+  if (!confirm(`Delete memoryd record ${selected.id}?`)) return;
+  try {
+    await apiDelete(`/api/memoryd/records/${encodeURIComponent(selected.id)}`);
+    if (msg) msg.textContent = `Deleted ${selected.id}`;
+    await loadMemorydPage(true);
+  } catch (e) {
+    if (msg) msg.textContent = 'Delete error: ' + (e.message || e);
+  }
+}
+
+async function memorydSaveSelectedRecord() {
+  const out = document.getElementById('memoryd-record-output');
+  const msg = document.getElementById('memoryd-msg');
+  if (!out) return;
+  let payload;
+  try {
+    payload = JSON.parse(out.value || '{}');
+  } catch (e) {
+    if (msg) msg.textContent = 'Selected record JSON is invalid';
+    return;
+  }
+  try {
+    await apiPost('/api/memoryd/records/upsert', { payload });
+    if (msg) msg.textContent = 'Record saved';
+    await loadMemorydPage(true);
+  } catch (e) {
+    if (msg) msg.textContent = 'Save error: ' + (e.message || e);
   }
 }
 

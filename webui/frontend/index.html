@@ -122,11 +122,25 @@
     .alog-detail { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 420px; }
     .alog-block { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--bg); min-height: 140px; overflow: auto; resize: vertical; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 
+    /* ── Memoryd page ─────────────────────────────────────── */
+    .memoryd-layout { display: grid; grid-template-columns: minmax(320px, 380px) 1fr; gap: 12px; }
+    .memoryd-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .memoryd-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .memoryd-toolbar select, .memoryd-toolbar input, .memoryd-panel input, .memoryd-panel textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+    .memoryd-types { display: flex; gap: 8px; flex-wrap: wrap; }
+    .memoryd-types label { font-size: 12px; }
+    .memoryd-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+    .memoryd-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .memoryd-table th { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.03); }
+    .memoryd-table td { border-bottom: 1px solid var(--border); }
+    .memoryd-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; min-height: 180px; max-height: 380px; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+
     @media (max-width: 900px) {
       .agent-layout { grid-template-columns: 1fr; }
       .chat-card { min-height: 360px; }
       .chat-msg { max-width: 95%; }
       .alog-layout { grid-template-columns: 1fr; }
+      .memoryd-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -157,6 +171,7 @@
     <button class="nav-tab" onclick="showPage('agent')">Agent</button>
     <button class="nav-tab" onclick="showPage('agentlog')">Agent Log</button>
     <button class="nav-tab" onclick="showPage('memory')">Memory</button>
+    <button class="nav-tab" onclick="showPage('memoryd')">MemoryD</button>
     <button class="nav-tab" onclick="showPage('langgraph')">LangGraph</button>
     <button class="nav-tab" onclick="showPage('settings')" title="Coming in a future phase">Settings</button>
     <span class="nav-spacer"></span>
@@ -390,6 +405,71 @@
           <button class="btn btn-danger" onclick="deleteSelectedMemoryDocument()">Delete</button>
         </div>
         <pre id="memory-doc-view-output" style="margin-top:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; min-height:160px; max-height:360px; overflow:auto; font-family:var(--mono);"></pre>
+      </div>
+    </div>
+
+    <!-- Memoryd page -->
+    <div id="page-memoryd" class="page">
+      <div class="memoryd-layout">
+        <div class="memoryd-panel">
+          <div class="memoryd-toolbar">
+            <label for="memoryd-envid-select">Envid</label>
+            <select id="memoryd-envid-select" onchange="loadMemorydPage(true)"></select>
+          </div>
+          <div class="memoryd-toolbar">
+            <label for="memoryd-muid-select">MUID</label>
+            <select id="memoryd-muid-select" onchange="loadMemorydRecords()"></select>
+          </div>
+          <div class="memoryd-toolbar">
+            <label for="memoryd-run-limit">Tick limit</label>
+            <input id="memoryd-run-limit" type="number" min="1" max="100" value="10" style="width:90px;">
+            <button class="btn" onclick="memorydRunTick()">Run Tick</button>
+          </div>
+          <div class="memoryd-toolbar">
+            <label for="memoryd-caller-tag">Caller tag</label>
+            <input id="memoryd-caller-tag" type="text" placeholder="agent/chat" style="flex:1; min-width:160px;">
+          </div>
+          <label>Memory types</label>
+          <div id="memoryd-types" class="memoryd-types"></div>
+          <label for="memoryd-source-context">Source context JSON</label>
+          <textarea id="memoryd-source-context" rows="6" placeholder='{"agent":"chat_group_helper"}'></textarea>
+          <label for="memoryd-final-response">Final response</label>
+          <textarea id="memoryd-final-response" rows="4" placeholder="Assistant response text..."></textarea>
+          <div class="memoryd-toolbar">
+            <button class="btn" onclick="memorydEnqueueTask()">Enqueue</button>
+            <button class="btn" onclick="memorydRefreshEnvids()">Reload Config</button>
+            <button class="btn" onclick="loadMemorydPage(true)">Refresh</button>
+            <button class="btn btn-danger" onclick="memorydDeleteSelectedRecord()">Delete selected record</button>
+            <button class="btn" onclick="memorydSaveSelectedRecord()">Save selected record</button>
+          </div>
+          <span id="memoryd-msg" class="nav-whoami"></span>
+          <div id="memoryd-meta" class="agent-meta">Memoryd status: unknown</div>
+        </div>
+
+        <div class="memoryd-panel">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div class="card-label">Records</div>
+            <span class="nav-spacer"></span>
+            <span id="memoryd-record-meta" class="nav-whoami">No record selected.</span>
+          </div>
+          <div class="memoryd-table-wrap">
+            <table class="memoryd-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Type</th>
+                  <th>Title</th>
+                  <th>Importance</th>
+                  <th>Updated</th>
+                  <th>Preview</th>
+                </tr>
+              </thead>
+              <tbody id="memoryd-record-table-body"></tbody>
+            </table>
+          </div>
+          <label for="memoryd-record-output">Selected record JSON</label>
+          <textarea id="memoryd-record-output" class="memoryd-output"></textarea>
+        </div>
       </div>
     </div>
 

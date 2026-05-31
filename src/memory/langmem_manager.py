@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import os
 from typing import Any
 
+from core.envid_runtime import build_effective_config
+from core.logging_utils import log
 from memory import get_memory_service
 
 
@@ -42,6 +44,9 @@ class LangMemManager:
         agent_reports: list[dict[str, Any]] = []
 
         for envid, agent_id in scopes:
+            if not self._memory_enabled_for_envid(envid):
+                log("memory", "info", f"langmem skip for envid={envid}: effective memory.enabled=false")
+                continue
             report = self.run_for_agent(agent_id, envid=envid)
             agent_reports.append(report)
             summary_count += int(report.get("summaries", 0))
@@ -55,6 +60,15 @@ class LangMemManager:
             "semantic_promotions": semantic_count,
             "archives": archive_count,
         }
+
+    def _memory_enabled_for_envid(self, envid: str | None) -> bool:
+        """Return whether memory subsystem is enabled in effective config for one scope."""
+
+        clean = str(envid or "").strip()
+        resolved = None if clean in {"", "global", "none", "null"} else clean
+        effective = build_effective_config(self.config, resolved)
+        memory_cfg = effective.get("memory", {}) if isinstance(effective, dict) else {}
+        return bool(memory_cfg.get("enabled", True)) if isinstance(memory_cfg, dict) else True
 
     def run_for_agent(self, agent_id: str, envid: str | None = None) -> dict[str, Any]:
         """Run maintenance for one agent namespace.

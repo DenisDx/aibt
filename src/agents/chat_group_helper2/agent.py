@@ -13,6 +13,7 @@ from langchain_core.prompts import MessagesPlaceholder
 
 from agents.base import AgentBase
 from agents.chat_group_helper.agent import ChatGroupHelperAgent
+from agents.message_utils import build_role_aware_messages
 from agents.llm_factory import build_llm
 from core.llm_wiretap import pop_llm_log_context
 from core.llm_wiretap import push_llm_log_context
@@ -226,50 +227,7 @@ class ChatGroupHelper2Agent(AgentBase):
 
     def _build_llm_messages(self, query: str, ctx: dict[str, Any]) -> list[Any]:
         """Build role-aware message list equivalent to chat_group_helper."""
-
-        recent = ctx.get("recent_messages", [])
-        items: list[dict[str, Any]] = []
-        if isinstance(recent, list):
-            limit = self._history_messages_limit()
-            items = [x for x in recent[-limit:] if isinstance(x, dict)]
-
-        if not items:
-            items = [
-                {
-                    "role": "user",
-                    "message_id": ctx.get("message_id", ""),
-                    "user_id": ctx.get("user_id", "unknown"),
-                    "display_name": ctx.get("display_name", ""),
-                    "username": ctx.get("username", ""),
-                    "text": query,
-                }
-            ]
-
-        out: list[Any] = []
-        for item in items:
-            text = str(item.get("text", "") or "").strip()
-            if not text:
-                continue
-            role = str(item.get("role", "user") or "user").strip().lower()
-            message_id = str(item.get("message_id", "") or "").strip()
-            user_id = str(item.get("user_id", "") or "unknown")
-            name = str(item.get("display_name", "") or item.get("username", "") or f"user_{user_id}").strip()
-            username = str(item.get("username", "") or "").strip().lstrip("@")
-            payload = json.dumps(
-                {
-                    "message_id": message_id,
-                    "user_id": user_id,
-                    "name": name,
-                    "username": username,
-                    "text": text,
-                },
-                ensure_ascii=False,
-            )
-            if role == "assistant":
-                out.append(AIMessage(content=payload))
-            else:
-                out.append(HumanMessage(content=payload))
-        return out or [HumanMessage(content=query)]
+        return build_role_aware_messages(query, ctx, history_limit=self._history_messages_limit())
 
     @staticmethod
     def _normalize_gate_token(raw: Any) -> str | None:

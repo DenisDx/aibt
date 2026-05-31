@@ -41,6 +41,7 @@
       "core": "info",
       "webui": "info",
       "cron": "info",
+      "memoryd": "info",
       "agents": "warning",
       "mcp": "warning",
     },
@@ -61,6 +62,10 @@
         "enabled": true,  // Enable conservative group helper agent.
         // "tools": ["search", "fetch"],  // Optional raw tools passthrough to this agent's direct LLM requests.
         "recent_messages_limit": 50,  // Recent message count included into model context.
+        "memoryd": {
+          "context_types": ["semantic", "episodic", "summaries", "profiles"],  // Types to attach into prompt context from memoryd.
+          "update_types": ["semantic", "episodic", "summaries", "profiles"]  // Types to enqueue for memoryd update processing.
+        },
         "logging": {
           "log_llm": true  // Persist LLM request/response rows for this agent.
         }
@@ -78,6 +83,10 @@
         },
         "delegate_agent": "chat_group_helper",  // Smart delegate agent id after gate accepts.
         "recent_messages_limit": 50,  // Recent message count used to build gate context.
+        "memoryd": {
+          "context_types": ["semantic", "episodic", "summaries", "profiles"],  // Types to attach into prompt context from memoryd.
+          "update_types": ["semantic", "episodic", "summaries", "profiles"]  // Types to enqueue for memoryd update processing.
+        },
         "logging": {
           "log_llm": true  // Persist LLM request/response rows for this agent.
         }
@@ -173,6 +182,44 @@
     },
   },
 
+  // Memoryd configuration (optional; enabled by an envid overlay below).
+  "memoryd": {
+    "enabled": false,
+    "provider": "default",
+    "model": "${LLM_MODEL:-gpt-4o-mini}",
+    // Agent-level policy can narrow active memoryd types by stage:
+    // agents.items.<agent>.memoryd.context_types and .update_types
+    "max_sim_task": 1,
+    "memory_task_prio": 8,
+    "muid": "default",
+    "queue": {
+      "cancel_policy": "cancel_previous_same_muid",
+      "max_pending": 10000,
+    },
+    "items": {
+      "episodic": {
+        "enabled": true,
+        "max_record_count": 30,
+        "max_content_length": 8196,
+      },
+      "semantic": {
+        "enabled": true,
+        "max_record_count": 50,
+        "max_content_length": 8196,
+      },
+      "summaries": {
+        "enabled": true,
+        "max_record_count": 10,
+        "max_content_length": 8196,
+      },
+      "profiles": {
+        "enabled": true,
+        "max_record_count": 50,
+        "max_content_length": 8196,
+      },
+    },
+  },
+
   // Web UI configuration.
   "webui": {
     "port": ${WEBUI_PORT:-50080},
@@ -241,6 +288,31 @@
       // "telegram": ["group_alpha", "group_beta"]  // Adapter-specific envid startup order.
     },
     "items": {
+      "envid-telegram-bot2-memoryd": {
+        "title": "Telegram bot2 memoryd routing",  // Human-readable overlay title.
+        "matching": {
+          "adapters": {
+            "telegram": {
+              "chat_ids": [-5090882533]  // Telegram chat id reserved for memoryd smoke/testing.
+            }
+          }
+        },
+        "runtime": { "enabled": true },  // Enable this envid runtime overlay.
+        "config": {
+          "memory": {
+            "enabled": false  // Disable legacy memory for this envid.
+          },
+          "memoryd": {
+            "enabled": true,  // Enable memoryd for this envid.
+            "requests": [
+              {
+                "types": ["episodic", "semantic", "summaries", "profiles"],
+                "request_file": "${AIBT_ROOT}/agent_files/memoryd_episodic_semantic_summaries_profiles.md"
+              }
+            ]
+          }
+        }
+      },
       "envid-telegram-bot2": {
         "title": "Telegram bot2 routing",  // Human-readable overlay title.
         "matching": {

@@ -37,7 +37,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.logging_utils import log, register_log_listener, unregister_log_listener
+from core.envid_runtime import build_effective_config
 from memory.api import get_memory_service
+from memoryd import get_memoryd_service
 
 
 def _utcnow() -> datetime:
@@ -124,6 +126,22 @@ class MemoryRunIngestRequest(BaseModel):
     limit: int | None = None
 
 
+class MemorydEnqueueRequest(BaseModel):
+    source_context: dict[str, Any]
+    final_response: str
+    muid: str | None = None
+    caller_tag: str | None = None
+    types: list[str] | None = None
+
+
+class MemorydRunRequest(BaseModel):
+    limit: int | None = None
+
+
+class MemorydUpsertRecordRequest(BaseModel):
+    payload: dict[str, Any]
+
+
 # ── WebUI server ──────────────────────────────────────────────────────────────
 
 class WebUIServer:
@@ -157,6 +175,7 @@ class WebUIServer:
         if self.webui_adapter is None:
             raise RuntimeError("webui adapter is not discovered; ensure src/adapters/webui/app.py is valid")
         self.memory_service = get_memory_service(self.root_dir, self.config)
+        self.memoryd_service = get_memoryd_service(self.root_dir, self.config)
 
     def _agent_allowed_corpora(self, agent_id: str | None) -> list[str] | None:
         """Return configured corpus allowlist for agent.
@@ -279,6 +298,12 @@ class WebUIServer:
             except RuntimeError:
                 pass
         return "online"
+
+    def _memoryd_service_for_envid(self, envid: str | None = None):
+        """Return memoryd service bound to an effective config for one envid."""
+
+        effective = build_effective_config(self.config, envid)
+        return get_memoryd_service(self.root_dir, effective)
 
     def _inflight_task_stats(self) -> dict[str, int]:
         """Count started-but-not-finished orchestrator tasks.
@@ -986,6 +1011,112 @@ class WebUIServer:
                 if deleted:
                     log("webui", "warning", f"Memory document deleted by {session.get('login', '?')}: {clean_id}")
                 return {"ok": True, "deleted": bool(deleted)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ── Memoryd API ─────────────────────────────────────────────────────
+
+        @app.get("/api/memoryd/envids")
+        async def api_memoryd_envids(session: dict = Depends(require)):
+            try:
+                svc = self._memoryd_service_for_envid(None)
+                return {"ok": True, "items": svc.list_envids()}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memoryd/muids")
+        async def api_memoryd_muids(envid: str = "", session: dict = Depends(require)):
+            try:
+                svc = self._memoryd_service_for_envid(envid.strip() or None)
+                items = svc.list_muids(limit=500)
+                effective = build_effective_config(self.config, envid.strip() or None)
+                memoryd_cfg = effective.get("memoryd", {}) if isinstance(effective, dict) else {}
+                return {
+                    "ok": True,
+                    "envid": envid.strip() or None,
+                    "default_muid": str(memoryd_cfg.get("muid") or "default"),
+                    "items": items,
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/api/memoryd/records")
+        async def api_memoryd_records(
+            muid: str,
+            types: str = "",
+            envid: str = "",
+            limit: int = 100,
+            offset: int = 0,
+            session: dict = Depends(require),
+        ):
+            clean_muid = muid.strip()
+            if not clean_muid:
+                raise HTTPException(status_code=400, detail="muid is required")
+            raw_types = [item.strip() for item in types.split(",") if item.strip()]
+            try:
+                svc = self._memoryd_service_for_envid(envid.strip() or None)
+                page = svc.list_records(clean_muid, types=raw_types or None, offset=max(0, int(offset)), limit=max(1, min(200, int(limit))))
+                return {"ok": True, **page}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memoryd/tasks/enqueue")
+        async def api_memoryd_tasks_enqueue(body: MemorydEnqueueRequest, session: dict = Depends(require)):
+            try:
+                envid = str(body.source_context.get("envid") or "").strip() or None
+                svc = self._memoryd_service_for_envid(envid)
+                result = svc.enqueue_update(
+                    source_context=body.source_context,
+                    final_response=body.final_response,
+                    muid=body.muid,
+                    caller_tag=body.caller_tag,
+                    types=body.types,
+                )
+                return {"ok": True, **result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memoryd/tasks/run")
+        async def api_memoryd_tasks_run(body: MemorydRunRequest | None = None, session: dict = Depends(require)):
+            try:
+                limit = int(body.limit) if body and body.limit is not None else None
+                svc = self._memoryd_service_for_envid(None)
+                result = svc.run_tick(limit=limit)
+                return {"ok": True, **result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memoryd/records/upsert")
+        async def api_memoryd_record_upsert(body: MemorydUpsertRecordRequest, session: dict = Depends(require)):
+            try:
+                svc = self._memoryd_service_for_envid(str(body.payload.get("envid") or "").strip() or None)
+                result = svc.upsert_record(body.payload)
+                return {"ok": True, "item": result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.delete("/api/memoryd/records/{record_id}")
+        async def api_memoryd_record_delete(record_id: str, session: dict = Depends(require)):
+            clean_id = record_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="record_id is required")
+            try:
+                svc = self._memoryd_service_for_envid(None)
+                svc.store.delete_record_by_id(clean_id)
+                return {"ok": True, "deleted": True}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memoryd/config/reload")
+        async def api_memoryd_config_reload(session: dict = Depends(require)):
+            """Re-read config.json5 from disk and refresh memoryd envid list."""
+            try:
+                from core.config import load_config as _load_config
+                fresh = _load_config(self.root_dir)
+                self.config = fresh
+                svc = self._memoryd_service_for_envid(None)
+                envids = svc.list_envids()
+                return {"ok": True, "items": envids}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 

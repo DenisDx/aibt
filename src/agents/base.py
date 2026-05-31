@@ -6,10 +6,12 @@ import os
 from typing import Any
 
 from core.envid_runtime import assemble_component_config
+from core.envid_runtime import build_effective_config
 from core.llm_wiretap import pop_llm_log_context
 from core.llm_wiretap import push_llm_log_context
 from core.logging_utils import log
 from memory.tools import MemoryTools
+from memoryd import get_memoryd_service
 
 
 class AgentBase(ABC):
@@ -53,36 +55,74 @@ class AgentBase(ABC):
         """Execute LangChain chain and return unified result payload."""
         ctx = context or {}
         envid = str(ctx.get("envid", "")).strip() or None
+        effective_config = build_effective_config(self.app_config, envid)
+        memory_cfg = effective_config.get("memory", {}) if isinstance(effective_config, dict) else {}
+        memory_enabled = bool(memory_cfg.get("enabled", True)) if isinstance(memory_cfg, dict) else True
         profile_id = str(ctx.get("chat_id") or ctx.get("user_id") or "").strip() or None
         memory_context = ""
+        memoryd_context = ""
         memory_meta: dict[str, Any] = {"semantic_hits": 0, "doc_hits": 0, "summary_hit": False, "procedural_items": 0}
+        memoryd_meta: dict[str, Any] = {"enabled": False, "selected_records_count": 0, "task_id": "", "types": []}
+
+        if memory_enabled:
+            try:
+                semantic_hits = self.memory_tools.recall_memory(
+                    agent_id=self.name,
+                    query=query,
+                    limit=5,
+                    envid=envid,
+                )
+                doc_hits = self.memory_tools.search_docs(
+                    query=query,
+                    corpora=self._allowed_corpora(),
+                    limit=6,
+                )
+                procedural_memory = self.memory_tools.get_procedural_memory(agent_id=self.name, limit=3, envid=envid)
+                session_summary: dict[str, Any] = {}
+                task_id = str(ctx.get("task_id", "") or "").strip()
+                if task_id:
+                    session_summary = self.memory_tools.get_session_summary(agent_id=self.name, thread_id=task_id, envid=envid)
+                memory_meta["semantic_hits"] = len(semantic_hits)
+                memory_meta["doc_hits"] = len(doc_hits)
+                memory_meta["summary_hit"] = bool(session_summary)
+                memory_meta["procedural_items"] = len(procedural_memory)
+
+                if semantic_hits or doc_hits or procedural_memory or session_summary:
+                    memory_context = self._format_memory_context(semantic_hits, doc_hits, procedural_memory, session_summary)
+            except Exception as e:
+                log("agents", "warning", f"Memory enrichment skipped for agent={self.name}: {e}")
+        else:
+            log("agents", "info", f"Memory enrichment disabled for agent={self.name} envid={envid or 'global'}")
 
         try:
-            semantic_hits = self.memory_tools.recall_memory(
-                agent_id=self.name,
-                query=query,
-                limit=5,
-                envid=envid,
-            )
-            doc_hits = self.memory_tools.search_docs(
-                query=query,
-                corpora=self._allowed_corpora(),
-                limit=6,
-            )
-            procedural_memory = self.memory_tools.get_procedural_memory(agent_id=self.name, limit=3, envid=envid)
-            session_summary: dict[str, Any] = {}
-            task_id = str(ctx.get("task_id", "") or "").strip()
-            if task_id:
-                session_summary = self.memory_tools.get_session_summary(agent_id=self.name, thread_id=task_id, envid=envid)
-            memory_meta["semantic_hits"] = len(semantic_hits)
-            memory_meta["doc_hits"] = len(doc_hits)
-            memory_meta["summary_hit"] = bool(session_summary)
-            memory_meta["procedural_items"] = len(procedural_memory)
-
-            if semantic_hits or doc_hits or procedural_memory or session_summary:
-                memory_context = self._format_memory_context(semantic_hits, doc_hits, procedural_memory, session_summary)
+            memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+            if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service.initialize()
+                muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
+                context_types = self._resolve_memoryd_context_types(effective_config)
+                if context_types:
+                    memoryd_result = memoryd_service.get_context(muid, types=context_types, render="markdown")
+                    memoryd_context = str(memoryd_result.get("text") or "").strip()
+                    memoryd_meta = {
+                        "enabled": True,
+                        "selected_records_count": int((memoryd_result.get("metadata") or {}).get("selected_records_count", 0) or 0),
+                        "task_id": "",
+                        "types": list((memoryd_result.get("metadata") or {}).get("types", []) or []),
+                    }
+                else:
+                    memoryd_meta = {
+                        "enabled": True,
+                        "selected_records_count": 0,
+                        "task_id": "",
+                        "types": [],
+                    }
+                    log("agents", "info", f"Memoryd context attach disabled by policy for agent={self.name} envid={envid or 'global'}")
         except Exception as e:
-            log("agents", "warning", f"Memory enrichment skipped for agent={self.name}: {e}")
+            log("agents", "warning", f"Memoryd enrichment skipped for agent={self.name}: {e}")
+
+        if memoryd_context:
+            memory_context = "\n\n".join(part for part in (memory_context, "Memoryd context:\n" + memoryd_context) if part)
 
         payload = {
             "query": query,
@@ -112,27 +152,55 @@ class AgentBase(ABC):
                 pop_llm_log_context(log_token)
         content = getattr(out, "content", out)
 
-        try:
-            self.memory_tools.record_episode(
-                agent_id=self.name,
-                text=f"query={query[:500]} result={str(content)[:1000]}",
-                task_id=str(ctx.get("task_id", "")) or None,
-                outcome="ok",
-                envid=envid,
-            )
-            if profile_id:
-                self.memory_tools.remember_profile_fact(
+        if memory_enabled:
+            try:
+                self.memory_tools.record_episode(
                     agent_id=self.name,
-                    profile_id=profile_id,
-                    text=f"recent_query={query[:280]} recent_result={str(content)[:280]}",
-                    scope="dialogue",
-                    importance=0.35,
+                    text=f"query={query[:500]} result={str(content)[:1000]}",
+                    task_id=str(ctx.get("task_id", "")) or None,
+                    outcome="ok",
                     envid=envid,
                 )
-        except Exception as e:
-            log("agents", "warning", f"Failed to record episode for agent={self.name}: {e}")
+                if profile_id:
+                    self.memory_tools.remember_profile_fact(
+                        agent_id=self.name,
+                        profile_id=profile_id,
+                        text=f"recent_query={query[:280]} recent_result={str(content)[:280]}",
+                        scope="dialogue",
+                        importance=0.35,
+                        envid=envid,
+                    )
+            except Exception as e:
+                log("agents", "warning", f"Failed to record episode for agent={self.name}: {e}")
+        else:
+            log("agents", "info", f"Memory writeback disabled for agent={self.name} envid={envid or 'global'}")
 
-        return {"result": content, "memory": memory_meta}
+        try:
+            effective_config = build_effective_config(self.app_config, envid)
+            memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+            if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service.initialize()
+                muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
+                update_types = self._resolve_memoryd_update_types(effective_config)
+                if update_types:
+                    enqueue_result = memoryd_service.enqueue_update(
+                        source_context={k: v for k, v in ctx.items() if k not in {"memory_context"}},
+                        final_response=str(content),
+                        muid=muid,
+                        caller_tag=str(ctx.get("caller_tag") or ctx.get("task_id") or self.name).strip() or None,
+                        types=update_types,
+                    )
+                    memoryd_meta.update({
+                        "task_id": str(enqueue_result.get("task_id") or ""),
+                        "types": list(enqueue_result.get("types") or memoryd_meta.get("types") or []),
+                    })
+                else:
+                    log("agents", "info", f"Memoryd update enqueue disabled by policy for agent={self.name} envid={envid or 'global'}")
+        except Exception as e:
+            log("agents", "warning", f"Memoryd enqueue skipped for agent={self.name}: {e}")
+
+        return {"result": content, "memory": memory_meta, "memoryd": memoryd_meta}
 
     def _llm_logging_enabled(self) -> bool:
         """Return true when JSONL logging of LLM exchanges is enabled for this agent."""
@@ -176,6 +244,96 @@ class AgentBase(ABC):
         if not isinstance(cfg, dict) or "tools" not in cfg:
             return (False, None)
         return (True, cfg.get("tools"))
+
+    def _agent_memoryd_cfg(self) -> dict[str, Any]:
+        """Return per-agent memoryd policy block from agent config."""
+
+        cfg = self.agent_config if isinstance(self.agent_config, dict) else {}
+        md = cfg.get("memoryd", {}) if isinstance(cfg, dict) else {}
+        return md if isinstance(md, dict) else {}
+
+    @staticmethod
+    def _memoryd_enabled_types(effective_config: dict[str, Any]) -> list[str]:
+        """Return enabled memoryd item types from effective config."""
+
+        memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+        items = memoryd_cfg.get("items", {}) if isinstance(memoryd_cfg, dict) else {}
+        out: list[str] = []
+        if not isinstance(items, dict):
+            return out
+        for type_name, item_cfg in items.items():
+            if isinstance(item_cfg, dict) and bool(item_cfg.get("enabled", False)):
+                name = str(type_name).strip().lower()
+                if name:
+                    out.append(name)
+        return sorted(set(out))
+
+    @staticmethod
+    def _memoryd_auto_writable_types(effective_config: dict[str, Any]) -> list[str]:
+        """Return enabled memoryd item types allowed for auto update enqueue."""
+
+        memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
+        items = memoryd_cfg.get("items", {}) if isinstance(memoryd_cfg, dict) else {}
+        out: list[str] = []
+        if not isinstance(items, dict):
+            return out
+        for type_name, item_cfg in items.items():
+            if not isinstance(item_cfg, dict):
+                continue
+            if not bool(item_cfg.get("enabled", False)):
+                continue
+            if bool(item_cfg.get("manual_only", False)) or bool(item_cfg.get("external_writer", False)):
+                continue
+            name = str(type_name).strip().lower()
+            if name:
+                out.append(name)
+        return sorted(set(out))
+
+    def _resolve_memoryd_policy_types(self, key: str, *, default_types: list[str], allowed_types: list[str]) -> list[str]:
+        """Resolve one per-agent memoryd type policy list with filtering."""
+
+        policy = self._agent_memoryd_cfg()
+        raw = policy.get(key) if isinstance(policy, dict) else None
+        if raw is None:
+            requested = list(default_types)
+        elif isinstance(raw, list):
+            requested = [str(item).strip().lower() for item in raw if str(item).strip()]
+        else:
+            log("agents", "warning", f"Invalid memoryd policy for agent={self.name}: {key} must be list; fallback to defaults")
+            requested = list(default_types)
+
+        allowed = set(str(x).strip().lower() for x in allowed_types if str(x).strip())
+        requested_set = {item for item in requested if item}
+        dropped = sorted(item for item in requested_set if item not in allowed)
+        if dropped:
+            log(
+                "agents",
+                "warning",
+                "Memoryd policy for "
+                f"agent={self.name} ignored unsupported {key}: {dropped}; allowed={sorted(allowed)}",
+            )
+        out = sorted(item for item in requested_set if item in allowed)
+        return out
+
+    def _resolve_memoryd_context_types(self, effective_config: dict[str, Any]) -> list[str]:
+        """Resolve final memoryd types for context attachment stage."""
+
+        enabled = self._memoryd_enabled_types(effective_config)
+        return self._resolve_memoryd_policy_types(
+            "context_types",
+            default_types=enabled,
+            allowed_types=enabled,
+        )
+
+    def _resolve_memoryd_update_types(self, effective_config: dict[str, Any]) -> list[str]:
+        """Resolve final memoryd types for async update enqueue stage."""
+
+        auto_writable = self._memoryd_auto_writable_types(effective_config)
+        return self._resolve_memoryd_policy_types(
+            "update_types",
+            default_types=auto_writable,
+            allowed_types=auto_writable,
+        )
 
     @staticmethod
     def _format_memory_context(
