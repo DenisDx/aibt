@@ -99,6 +99,19 @@ class MemoryExecutorStore:
             return None
         return int(text)
 
+    @staticmethod
+    def _normalize_optional_float(value: Any) -> float | None:
+        """Normalize optional float; blank-like values become None."""
+
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return float(int(value))
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+
     def _prepare_task_payload(self, payload: dict[str, Any], task_id: str | None = None) -> dict[str, Any]:
         """Validate and normalize one task payload for DB operations."""
 
@@ -132,6 +145,15 @@ class MemoryExecutorStore:
         task["todo_title"] = str(task.get("todo_title") or "").strip() or None
         task["provider"] = str(task.get("provider") or "").strip() or None
         task["model"] = str(task.get("model") or "").strip() or None
+        task["temperature"] = self._normalize_optional_float(task.get("temperature"))
+        task["top_p"] = self._normalize_optional_float(task.get("top_p"))
+        task["repetition_penalty"] = self._normalize_optional_float(task.get("repetition_penalty"))
+        task["max_tokens"] = self._normalize_optional_int(task.get("max_tokens"))
+        task["seed"] = self._normalize_optional_int(task.get("seed"))
+        task["presence_penalty"] = self._normalize_optional_float(task.get("presence_penalty"))
+        task["frequency_penalty"] = self._normalize_optional_float(task.get("frequency_penalty"))
+        task["top_k"] = self._normalize_optional_int(task.get("top_k"))
+        task["min_p"] = self._normalize_optional_float(task.get("min_p"))
         task["tools"] = self._normalize_tools(task.get("tools"))
         task["context_types"] = self._normalize_types(task.get("context_types") or [])
         task["update_types"] = self._normalize_types(task.get("update_types") or [])
@@ -163,6 +185,15 @@ class MemoryExecutorStore:
                       request_text TEXT NOT NULL,
                       provider TEXT,
                       model TEXT,
+                      temperature DOUBLE PRECISION,
+                      top_p DOUBLE PRECISION,
+                      repetition_penalty DOUBLE PRECISION,
+                      max_tokens INTEGER,
+                      seed BIGINT,
+                      presence_penalty DOUBLE PRECISION,
+                      frequency_penalty DOUBLE PRECISION,
+                      top_k INTEGER,
+                      min_p DOUBLE PRECISION,
                       tools JSONB,
                       context_types JSONB NOT NULL DEFAULT '[]'::jsonb,
                       update_types JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -176,6 +207,15 @@ class MemoryExecutorStore:
                 )
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS execution_policy TEXT NOT NULL DEFAULT 'idle'")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS enqueue_key TEXT")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS top_p DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS repetition_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS max_tokens INTEGER")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS seed BIGINT")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS presence_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS frequency_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS top_k INTEGER")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS min_p DOUBLE PRECISION")
                 cur.execute(
                     """
                     DO $$
@@ -282,11 +322,13 @@ class MemoryExecutorStore:
                     """
                     INSERT INTO memory_executor_tasks(
                                             id, name, enabled, envid, muid, period_sec, todo_title, request_text,
-                      provider, model, tools, context_types, update_types, execution_policy,
+                                            provider, model, temperature, top_p, repetition_penalty, max_tokens,
+                                            seed, presence_penalty, frequency_penalty, top_k, min_p,
+                                            tools, context_types, update_types, execution_policy,
                                             enqueue_key, last_run_at
                     ) VALUES (
                       %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
                                             %s, NULL
                     )
                     RETURNING *
@@ -302,6 +344,15 @@ class MemoryExecutorStore:
                         task["request_text"],
                         task["provider"],
                         task["model"],
+                        task["temperature"],
+                        task["top_p"],
+                        task["repetition_penalty"],
+                        task["max_tokens"],
+                        task["seed"],
+                        task["presence_penalty"],
+                        task["frequency_penalty"],
+                        task["top_k"],
+                        task["min_p"],
                         self._encode_jsonb(task["tools"]),
                         self._encode_jsonb(task["context_types"]),
                         self._encode_jsonb(task["update_types"]),
@@ -332,6 +383,15 @@ class MemoryExecutorStore:
                         request_text=%s,
                         provider=%s,
                         model=%s,
+                        temperature=%s,
+                        top_p=%s,
+                        repetition_penalty=%s,
+                        max_tokens=%s,
+                        seed=%s,
+                        presence_penalty=%s,
+                        frequency_penalty=%s,
+                        top_k=%s,
+                        min_p=%s,
                         tools=%s::jsonb,
                         context_types=%s::jsonb,
                         update_types=%s::jsonb,
@@ -351,6 +411,15 @@ class MemoryExecutorStore:
                         task["request_text"],
                         task["provider"],
                         task["model"],
+                        task["temperature"],
+                        task["top_p"],
+                        task["repetition_penalty"],
+                        task["max_tokens"],
+                        task["seed"],
+                        task["presence_penalty"],
+                        task["frequency_penalty"],
+                        task["top_k"],
+                        task["min_p"],
                         self._encode_jsonb(task["tools"]),
                         self._encode_jsonb(task["context_types"]),
                         self._encode_jsonb(task["update_types"]),
@@ -466,6 +535,52 @@ class MemoryExecutorAgent(AgentBase):
                 f"max_due={max_due if max_due > 0 else 'uncapped'}"
             ),
         )
+
+    def run_task_now(self, task_id: str) -> dict[str, Any]:
+        """Enqueue one selected task immediately, bypassing due checks."""
+
+        clean_id = str(task_id or "").strip()
+        if not clean_id:
+            raise ValueError("task_id is required")
+
+        self._store.ensure_schema()
+        task = self._store.get_task(clean_id)
+        if task is None:
+            return {"ok": True, "found": False, "queued": False, "reason": "task_not_found"}
+
+        request_text = str(task.get("request_text") or "").strip()
+        if not request_text:
+            return {"ok": True, "found": True, "queued": False, "reason": "task_request_text_is_empty"}
+
+        resolved_request, unresolved = self._resolve_placeholders(request_text)
+        if unresolved:
+            return {
+                "ok": True,
+                "found": True,
+                "queued": False,
+                "reason": "unresolved_placeholders",
+                "placeholders": sorted(unresolved),
+            }
+
+        root_dir = str(self.app_config.get("root") or os.getcwd())
+        task_envid = str(task.get("envid") or "").strip() or None
+        effective_cfg = build_effective_config(self.app_config, task_envid)
+        memoryd_service = get_memoryd_service(root_dir, effective_cfg)
+        memoryd_service.initialize()
+        now_utc = datetime.now(timezone.utc)
+
+        queued = self._enqueue_one(
+            task=task,
+            task_envid=task_envid,
+            memoryd_service=memoryd_service,
+            rendered_text=resolved_request,
+            todo_record=None,
+            now_utc=now_utc,
+        )
+        if queued:
+            self._store.mark_task_checked(clean_id, now_utc)
+            return {"ok": True, "found": True, "queued": True, "task_id": clean_id}
+        return {"ok": True, "found": True, "queued": False, "reason": "not_queued", "task_id": clean_id}
 
     def _max_due_tasks_per_tick(self, config: dict[str, Any]) -> int:
         """Read max due task cap from effective config."""
@@ -593,9 +708,9 @@ class MemoryExecutorAgent(AgentBase):
         work_hash = self._work_hash(task=task, muid=muid, rendered_text=rendered_text, todo_record=todo_record)
         context_types = self._resolve_task_memoryd_types(task, task_envid, key="context_types")
         update_types = self._resolve_task_memoryd_types(task, task_envid, key="update_types")
+        user_query = self._todo_effective_body(todo_record) if isinstance(todo_record, dict) else ""
         source_context = {
             "adapter": "memory_executor",
-            "query": rendered_text,
             "envid": task_envid,
             "task_id": task_id,
             "caller_tag": enqueue_key,
@@ -610,6 +725,8 @@ class MemoryExecutorAgent(AgentBase):
             if isinstance(todo_record, dict)
             else None,
         }
+        if user_query:
+            source_context["query"] = user_query
         response = memoryd_service.enqueue_update(
             source_context=source_context,
             final_response=rendered_text,
@@ -619,6 +736,15 @@ class MemoryExecutorAgent(AgentBase):
             request_text=rendered_text,
             provider=str(task.get("provider") or "").strip() or None,
             model=str(task.get("model") or "").strip() or None,
+            temperature=task.get("temperature"),
+            top_p=task.get("top_p"),
+            repetition_penalty=task.get("repetition_penalty"),
+            max_tokens=task.get("max_tokens"),
+            seed=task.get("seed"),
+            presence_penalty=task.get("presence_penalty"),
+            frequency_penalty=task.get("frequency_penalty"),
+            top_k=task.get("top_k"),
+            min_p=task.get("min_p"),
             tools=task.get("tools"),
             context_types=context_types,
             types=update_types,

@@ -90,6 +90,15 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
             "envid": "envid-1",
             "provider": "openaix",
             "model": "gpt-test",
+            "temperature": 0.4,
+            "top_p": 0.9,
+            "repetition_penalty": 1.2,
+            "max_tokens": 1234,
+            "seed": 42,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+            "top_k": 30,
+            "min_p": 0.05,
             "tools": ["search"],
             "context_types": ["semantic", "todo"],
             "update_types": ["news"],
@@ -108,9 +117,50 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
         self.assertEqual(svc.last.get("final_response"), "prompt text")
         self.assertEqual(svc.last.get("provider"), "openaix")
         self.assertEqual(svc.last.get("model"), "gpt-test")
+        self.assertEqual(svc.last.get("temperature"), 0.4)
+        self.assertEqual(svc.last.get("top_p"), 0.9)
+        self.assertEqual(svc.last.get("repetition_penalty"), 1.2)
+        self.assertEqual(svc.last.get("max_tokens"), 1234)
+        self.assertEqual(svc.last.get("seed"), 42)
+        self.assertEqual(svc.last.get("presence_penalty"), 0.1)
+        self.assertEqual(svc.last.get("frequency_penalty"), 0.2)
+        self.assertEqual(svc.last.get("top_k"), 30)
+        self.assertEqual(svc.last.get("min_p"), 0.05)
         self.assertEqual(svc.last.get("tools"), ["search"])
         self.assertEqual(svc.last.get("context_types"), ["semantic", "todo"])
         self.assertEqual(svc.last.get("types"), ["news"])
+        self.assertNotIn("query", svc.last.get("source_context") or {})
+
+    def test_enqueue_one_todo_task_passes_todo_text_as_query(self) -> None:
+        class _Svc:
+            def __init__(self):
+                self.last = None
+
+            def enqueue_update(self, **kwargs):
+                self.last = kwargs
+                return {"queued": True}
+
+        svc = _Svc()
+        task = {
+            "id": "task-2",
+            "muid": "muid-1",
+            "update_types": ["news"],
+        }
+        todo = {
+            "id": 7,
+            "title": "collect-news",
+            "body": '{"status":"in_progress","text":"scan vendor launches"}',
+        }
+        queued = self.agent._enqueue_one(
+            task=task,
+            task_envid="envid-1",
+            memoryd_service=svc,
+            rendered_text="prompt text",
+            todo_record=todo,
+            now_utc=__import__("datetime").datetime.utcnow(),
+        )
+        self.assertTrue(queued)
+        self.assertEqual((svc.last.get("source_context") or {}).get("query"), "scan vendor launches")
 
 
 if __name__ == "__main__":

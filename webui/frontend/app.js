@@ -1082,6 +1082,13 @@ async function memorydEnqueueTask() {
   const srcEl = document.getElementById('memoryd-source-context');
   const finalEl = document.getElementById('memoryd-final-response');
   const msg = document.getElementById('memoryd-msg');
+  const readOptionalNumber = (id, integer = false) => {
+    const raw = String(document.getElementById(id)?.value || '').trim();
+    if (!raw) return null;
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return null;
+    return integer ? Math.trunc(num) : num;
+  };
   const envid = String(envidSel?.value || '').trim();
   const muid = String(muidSel?.value || '').trim();
   const caller_tag = String(callerTagEl?.value || '').trim() || null;
@@ -1106,6 +1113,15 @@ async function memorydEnqueueTask() {
       final_response,
       muid,
       caller_tag,
+      temperature: readOptionalNumber('memoryd-field-temperature'),
+      top_p: readOptionalNumber('memoryd-field-top-p'),
+      repetition_penalty: readOptionalNumber('memoryd-field-repetition-penalty'),
+      max_tokens: readOptionalNumber('memoryd-field-max-tokens', true),
+      seed: readOptionalNumber('memoryd-field-seed', true),
+      presence_penalty: readOptionalNumber('memoryd-field-presence-penalty'),
+      frequency_penalty: readOptionalNumber('memoryd-field-frequency-penalty'),
+      top_k: readOptionalNumber('memoryd-field-top-k', true),
+      min_p: readOptionalNumber('memoryd-field-min-p'),
       types,
     });
     if (msg) msg.textContent = `Queued ${res.task_id || 'ok'}`;
@@ -1471,6 +1487,15 @@ function renderMemoryExecutorSelectedTask() {
   setText('memory-executor-field-todo-title', task.todo_title || '');
   setText('memory-executor-field-provider', task.provider || '');
   setText('memory-executor-field-model', task.model || '');
+  setText('memory-executor-field-temperature', task.temperature == null ? '' : task.temperature);
+  setText('memory-executor-field-top-p', task.top_p == null ? '' : task.top_p);
+  setText('memory-executor-field-repetition-penalty', task.repetition_penalty == null ? '' : task.repetition_penalty);
+  setText('memory-executor-field-max-tokens', task.max_tokens == null ? '' : task.max_tokens);
+  setText('memory-executor-field-seed', task.seed == null ? '' : task.seed);
+  setText('memory-executor-field-presence-penalty', task.presence_penalty == null ? '' : task.presence_penalty);
+  setText('memory-executor-field-frequency-penalty', task.frequency_penalty == null ? '' : task.frequency_penalty);
+  setText('memory-executor-field-top-k', task.top_k == null ? '' : task.top_k);
+  setText('memory-executor-field-min-p', task.min_p == null ? '' : task.min_p);
   setText('memory-executor-field-enqueue-key', task.enqueue_key || '');
   setText('memory-executor-field-request-text', task.request_text || '');
   setText('memory-executor-field-tools', Array.isArray(task.tools) ? task.tools.join(',') : '');
@@ -1492,6 +1517,15 @@ function memoryExecutorNewTaskTemplate() {
     request_text: 'Summarize recent dialogue and update semantic/profile memories.',
     provider: null,
     model: null,
+    temperature: null,
+    top_p: null,
+    repetition_penalty: null,
+    max_tokens: null,
+    seed: null,
+    presence_penalty: null,
+    frequency_penalty: null,
+    top_k: null,
+    min_p: null,
     tools: null,
     context_types: ['semantic', 'profiles', 'todo'],
     update_types: ['semantic', 'profiles'],
@@ -1536,6 +1570,13 @@ function memoryExecutorReadTaskFromForm() {
     const v = readText(id);
     return v ? v : null;
   };
+  const readOptionalNumber = (id, integer = false) => {
+    const raw = readText(id);
+    if (!raw) return null;
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return null;
+    return integer ? Math.trunc(num) : num;
+  };
 
   const enabledEl = document.getElementById('memory-executor-field-enabled');
   const periodRaw = readText('memory-executor-field-period');
@@ -1553,6 +1594,15 @@ function memoryExecutorReadTaskFromForm() {
     request_text: String(document.getElementById('memory-executor-field-request-text')?.value || ''),
     provider: readOptionalText('memory-executor-field-provider'),
     model: readOptionalText('memory-executor-field-model'),
+    temperature: readOptionalNumber('memory-executor-field-temperature'),
+    top_p: readOptionalNumber('memory-executor-field-top-p'),
+    repetition_penalty: readOptionalNumber('memory-executor-field-repetition-penalty'),
+    max_tokens: readOptionalNumber('memory-executor-field-max-tokens', true),
+    seed: readOptionalNumber('memory-executor-field-seed', true),
+    presence_penalty: readOptionalNumber('memory-executor-field-presence-penalty'),
+    frequency_penalty: readOptionalNumber('memory-executor-field-frequency-penalty'),
+    top_k: readOptionalNumber('memory-executor-field-top-k', true),
+    min_p: readOptionalNumber('memory-executor-field-min-p'),
     tools: (() => {
       const text = readText('memory-executor-field-tools');
       if (!text) return null;
@@ -1625,6 +1675,29 @@ async function memoryExecutorDeleteTask() {
     renderMemoryExecutorSelectedTask();
   } catch (e) {
     if (msg) msg.textContent = 'Delete error: ' + (e.message || e);
+  }
+}
+
+async function memoryExecutorRunTaskNow() {
+  const selected = _memoryExecutorTasks.find(t => String(t.id || '') === String(_memoryExecutorSelectedId || '')) || null;
+  const msg = document.getElementById('memory-executor-msg');
+  if (!selected) {
+    if (msg) msg.textContent = 'No selected task.';
+    return;
+  }
+  if (msg) msg.textContent = `Queueing task ${selected.id}...`;
+  try {
+    const res = await apiPost(`/api/memory-executor/tasks/${encodeURIComponent(String(selected.id))}/run`, {});
+    if (msg) {
+      msg.textContent = res.queued
+        ? `Task ${selected.id} queued in memoryd.`
+        : `Task ${selected.id} was not queued${res.reason ? ` (${res.reason})` : ''}.`;
+    }
+    await loadMemoryExecutorTasks();
+    renderMemoryExecutorTaskList();
+    renderMemoryExecutorSelectedTask();
+  } catch (e) {
+    if (msg) msg.textContent = 'Run task error: ' + (e.message || e);
   }
 }
 

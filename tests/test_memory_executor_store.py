@@ -36,6 +36,15 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
                 "context_types": ["Semantic", "semantic", " todo "],
                 "update_types": ["Profiles", "profiles"],
                 "tools": ["search", "search", "fetch"],
+                "temperature": " 0.4 ",
+                "top_p": "0.9",
+                "repetition_penalty": " 1.2 ",
+                "max_tokens": "2000",
+                "seed": " 42 ",
+                "presence_penalty": " 0.1 ",
+                "frequency_penalty": "0.2",
+                "top_k": "40",
+                "min_p": " 0.05 ",
                 "execution_policy": " IDLE ",
             }
         )
@@ -45,6 +54,15 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
         self.assertEqual(payload["context_types"], ["semantic", "todo"])
         self.assertEqual(payload["update_types"], ["profiles"])
         self.assertEqual(payload["tools"], ["search", "fetch"])
+        self.assertEqual(payload["temperature"], 0.4)
+        self.assertEqual(payload["top_p"], 0.9)
+        self.assertEqual(payload["repetition_penalty"], 1.2)
+        self.assertEqual(payload["max_tokens"], 2000)
+        self.assertEqual(payload["seed"], 42)
+        self.assertEqual(payload["presence_penalty"], 0.1)
+        self.assertEqual(payload["frequency_penalty"], 0.2)
+        self.assertEqual(payload["top_k"], 40)
+        self.assertEqual(payload["min_p"], 0.05)
         self.assertEqual(payload["execution_policy"], "idle")
         self.assertTrue(payload["id"])
 
@@ -59,6 +77,15 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
                 "todo_title": "\t  ",
                 "provider": "   ",
                 "model": "\t",
+                "temperature": " \t ",
+                "top_p": " ",
+                "repetition_penalty": "\t",
+                "max_tokens": "   ",
+                "seed": " ",
+                "presence_penalty": "\t ",
+                "frequency_penalty": "",
+                "top_k": "   ",
+                "min_p": "\t",
                 "enqueue_key": "\t   ",
                 "tools": ["\t", "   "],
             }
@@ -68,6 +95,15 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
         self.assertIsNone(payload["todo_title"])
         self.assertIsNone(payload["provider"])
         self.assertIsNone(payload["model"])
+        self.assertIsNone(payload["temperature"])
+        self.assertIsNone(payload["top_p"])
+        self.assertIsNone(payload["repetition_penalty"])
+        self.assertIsNone(payload["max_tokens"])
+        self.assertIsNone(payload["seed"])
+        self.assertIsNone(payload["presence_penalty"])
+        self.assertIsNone(payload["frequency_penalty"])
+        self.assertIsNone(payload["top_k"])
+        self.assertIsNone(payload["min_p"])
         self.assertIsNone(payload["enqueue_key"])
         self.assertIsNone(payload["tools"])
 

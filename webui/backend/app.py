@@ -134,6 +134,15 @@ class MemorydEnqueueRequest(BaseModel):
     request_text: str | None = None
     provider: str | None = None
     model: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    repetition_penalty: float | None = None
+    max_tokens: int | None = None
+    seed: int | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
     tools: list[Any] | None = None
     context_types: list[str] | None = None
     types: list[str] | None = None
@@ -400,6 +409,14 @@ class WebUIServer:
         if agent_classes is None:
             return True
         return "memory_executor" in agent_classes
+
+    def _memory_executor_run_task_now(self, task_id: str) -> dict[str, Any]:
+        """Enqueue one Memory Executor task immediately."""
+
+        from agents.memory_executor.agent import MemoryExecutorAgent
+
+        agent = MemoryExecutorAgent(self.config, {"name": "memory_executor"})
+        return agent.run_task_now(task_id)
 
     def _inflight_task_stats(self) -> dict[str, int]:
         """Count started-but-not-finished orchestrator tasks.
@@ -1197,6 +1214,15 @@ class WebUIServer:
                     request_text=body.request_text,
                     provider=body.provider,
                     model=body.model,
+                    temperature=body.temperature,
+                    top_p=body.top_p,
+                    repetition_penalty=body.repetition_penalty,
+                    max_tokens=body.max_tokens,
+                    seed=body.seed,
+                    presence_penalty=body.presence_penalty,
+                    frequency_penalty=body.frequency_penalty,
+                    top_k=body.top_k,
+                    min_p=body.min_p,
                     tools=body.tools,
                     context_types=body.context_types,
                     types=body.types,
@@ -1355,6 +1381,25 @@ class WebUIServer:
                     runtime={"source": "webui.memory_executor.run", "root_dir": self.root_dir, "envid": envid or None}
                 )
                 return {"ok": True, **stats}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/api/memory-executor/tasks/{task_id}/run")
+        async def api_memory_executor_run_task_now(task_id: str, session: dict = Depends(require)):
+            clean_id = task_id.strip()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="task_id is required")
+            if not self._memory_executor_available():
+                raise HTTPException(status_code=404, detail="memory_executor is not available")
+            try:
+                result = self._memory_executor_run_task_now(clean_id)
+                if not bool(result.get("found", True)):
+                    raise HTTPException(status_code=404, detail="task not found")
+                return {"ok": True, **result}
+            except HTTPException:
+                raise
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 

@@ -456,6 +456,15 @@ class MemorydService:
         request_text: str | None = None,
         provider: str | None = None,
         model: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        repetition_penalty: float | None = None,
+        max_tokens: int | None = None,
+        seed: int | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
         tools: list[Any] | None = None,
         context_types: list[Any] | None = None,
         types: list[Any] | None = None,
@@ -495,6 +504,15 @@ class MemorydService:
         norm_caller_tag = str(caller_tag).strip() if caller_tag is not None and str(caller_tag).strip() else None
         norm_work_hash = str(work_hash).strip() if work_hash is not None and str(work_hash).strip() else None
         norm_request_text = str(request_text).strip() if request_text is not None and str(request_text).strip() else None
+        norm_temperature = None if temperature is None or str(temperature).strip() == "" else float(temperature)
+        norm_top_p = None if top_p is None or str(top_p).strip() == "" else float(top_p)
+        norm_repetition_penalty = None if repetition_penalty is None or str(repetition_penalty).strip() == "" else float(repetition_penalty)
+        norm_max_tokens = None if max_tokens is None or str(max_tokens).strip() == "" else int(max_tokens)
+        norm_seed = None if seed is None or str(seed).strip() == "" else int(seed)
+        norm_presence_penalty = None if presence_penalty is None or str(presence_penalty).strip() == "" else float(presence_penalty)
+        norm_frequency_penalty = None if frequency_penalty is None or str(frequency_penalty).strip() == "" else float(frequency_penalty)
+        norm_top_k = None if top_k is None or str(top_k).strip() == "" else int(top_k)
+        norm_min_p = None if min_p is None or str(min_p).strip() == "" else float(min_p)
         if norm_work_hash is not None:
             inflight = self.store.find_inflight_tasks(muid, caller_tag=norm_caller_tag, work_hash=norm_work_hash)
             if inflight:
@@ -522,6 +540,15 @@ class MemorydService:
                 "request_text": norm_request_text,
                 "provider": norm_provider,
                 "model": norm_model,
+                "temperature": norm_temperature,
+                "top_p": norm_top_p,
+                "repetition_penalty": norm_repetition_penalty,
+                "max_tokens": norm_max_tokens,
+                "seed": norm_seed,
+                "presence_penalty": norm_presence_penalty,
+                "frequency_penalty": norm_frequency_penalty,
+                "top_k": norm_top_k,
+                "min_p": norm_min_p,
                 "tools": norm_tools,
                 "context_types": resolved_context_types,
                 "requested_types": resolved_types,
@@ -818,6 +845,15 @@ class MemorydService:
         try:
             provider = str(task.get("provider") or "").strip() or self._active_provider()
             model = self._resolve_model_for_provider(provider, str(task.get("model") or "").strip() or None)
+            temperature = task.get("temperature")
+            top_p = task.get("top_p")
+            repetition_penalty = task.get("repetition_penalty")
+            max_tokens = task.get("max_tokens")
+            seed = task.get("seed")
+            presence_penalty = task.get("presence_penalty")
+            frequency_penalty = task.get("frequency_penalty")
+            top_k = task.get("top_k")
+            min_p = task.get("min_p")
             if request_override:
                 request_text = request_override
                 if not request_text:
@@ -848,10 +884,28 @@ class MemorydService:
             messages = self._build_llm_messages(request_text, task, snapshot)
 
             task_tools = deserialize_json(task.get("tools"), None)
-            if task_tools is None:
-                llm = build_llm(self.config, provider=provider, model=model)
-            else:
-                llm = build_llm(self.config, provider=provider, model=model, tools=task_tools)
+            build_kwargs: dict[str, Any] = {"provider": provider, "model": model}
+            if task_tools is not None:
+                build_kwargs["tools"] = task_tools
+            if temperature is not None:
+                build_kwargs["temperature"] = temperature
+            if top_p is not None:
+                build_kwargs["top_p"] = top_p
+            if repetition_penalty is not None:
+                build_kwargs["repetition_penalty"] = repetition_penalty
+            if max_tokens is not None:
+                build_kwargs["max_tokens"] = max_tokens
+            if seed is not None:
+                build_kwargs["seed"] = seed
+            if presence_penalty is not None:
+                build_kwargs["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None:
+                build_kwargs["frequency_penalty"] = frequency_penalty
+            if top_k is not None:
+                build_kwargs["top_k"] = top_k
+            if min_p is not None:
+                build_kwargs["min_p"] = min_p
+            llm = build_llm(self.config, **build_kwargs)
             log_token = None
             if self._llm_logging_enabled():
                 log_token = push_llm_log_context(

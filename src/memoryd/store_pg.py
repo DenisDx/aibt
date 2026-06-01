@@ -111,6 +111,15 @@ class MemorydStore:
                                             request_text TEXT,
                                             provider TEXT,
                                             model TEXT,
+                                                                    temperature DOUBLE PRECISION,
+                                                                    top_p DOUBLE PRECISION,
+                                                                    repetition_penalty DOUBLE PRECISION,
+                                                                    max_tokens INTEGER,
+                                                                    seed BIGINT,
+                                                                    presence_penalty DOUBLE PRECISION,
+                                                                    frequency_penalty DOUBLE PRECISION,
+                                                                    top_k INTEGER,
+                                                                    min_p DOUBLE PRECISION,
                                             tools JSONB,
                                             context_types JSONB,
                       requested_types JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -130,6 +139,15 @@ class MemorydStore:
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS work_hash TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS provider TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS model TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS top_p DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS repetition_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS max_tokens INTEGER")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS seed BIGINT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS presence_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS frequency_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS top_k INTEGER")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS min_p DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS tools JSONB")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS context_types JSONB")
                 cur.execute(
@@ -452,6 +470,15 @@ class MemorydStore:
         request_preview = _preview_data_block(request_text, head=100, tail=100)
         provider = str(task.get("provider") or "").strip()
         model = str(task.get("model") or "").strip()
+        temperature = task.get("temperature")
+        top_p = task.get("top_p")
+        repetition_penalty = task.get("repetition_penalty")
+        max_tokens = task.get("max_tokens")
+        seed = task.get("seed")
+        presence_penalty = task.get("presence_penalty")
+        frequency_penalty = task.get("frequency_penalty")
+        top_k = task.get("top_k")
+        min_p = task.get("min_p")
         log(
             "memoryd",
             "info",
@@ -459,9 +486,18 @@ class MemorydStore:
                 "create memory task params "
                 f"task_id={task.get('task_id')} muid={task.get('muid')} caller_tag={task.get('caller_tag')} "
                 f"work_hash={task.get('work_hash')} "
-            f"provider={provider or '<default>'} model={model or '<default>'} "
+                f"provider={provider or '<default>'} model={model or '<default>'} "
+                f"temperature={temperature if temperature is not None else '<default>'} "
+                f"top_p={top_p if top_p is not None else '<default>'} "
+                f"repetition_penalty={repetition_penalty if repetition_penalty is not None else '<default>'} "
+                f"max_tokens={max_tokens if max_tokens is not None else '<default>'} "
+                f"seed={seed if seed is not None else '<default>'} "
+                f"presence_penalty={presence_penalty if presence_penalty is not None else '<default>'} "
+                f"frequency_penalty={frequency_penalty if frequency_penalty is not None else '<default>'} "
+                f"top_k={top_k if top_k is not None else '<default>'} "
+                f"min_p={min_p if min_p is not None else '<default>'} "
                 f"request_text_len={len(request_text)} request_text_preview={request_preview} "
-            f"context_types={task.get('context_types') or []} tools={task.get('tools') if task.get('tools') is not None else '<default>'} "
+                f"context_types={task.get('context_types') or []} tools={task.get('tools') if task.get('tools') is not None else '<default>'} "
                 f"requested_types={task.get('requested_types') or []} "
                 f"source_context_len={len(source_context_text)} source_context_preview={source_context_preview} "
                 f"final_response_len={len(final_response)} final_response_preview={final_response_preview}"
@@ -473,8 +509,11 @@ class MemorydStore:
                 cur.execute(
                     """
                     INSERT INTO memoryd_tasks(
-                                            task_id, muid, caller_tag, work_hash, request_text, provider, model, tools, context_types, requested_types, source_context, final_response, status, prio
-                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                                            task_id, muid, caller_tag, work_hash, request_text, provider, model,
+                                            temperature, top_p, repetition_penalty, max_tokens,
+                                            seed, presence_penalty, frequency_penalty, top_k, min_p,
+                                            tools, context_types, requested_types, source_context, final_response, status, prio
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                     """,
                     (
                         task["task_id"],
@@ -484,6 +523,15 @@ class MemorydStore:
                         task.get("request_text"),
                                                 task.get("provider"),
                                                 task.get("model"),
+                                                task.get("temperature"),
+                                                task.get("top_p"),
+                                                task.get("repetition_penalty"),
+                                                task.get("max_tokens"),
+                                                task.get("seed"),
+                                                task.get("presence_penalty"),
+                                                task.get("frequency_penalty"),
+                                                task.get("top_k"),
+                                                task.get("min_p"),
                                                 self._json_value(task.get("tools")) if task.get("tools") is not None else None,
                                                 self._json_value(task.get("context_types")) if task.get("context_types") is not None else None,
                         self._json_value(task.get("requested_types") or []),

@@ -132,6 +132,13 @@ class MemoryExecutorApiTest(unittest.TestCase):
 
         self.server = WebUIServer(self.root, self.config)
         self.server._memory_executor_store_for_envid = lambda envid=None: self.fake_store
+        self.server._memory_executor_run_task_now = lambda task_id: {
+            "ok": True,
+            "found": task_id in self.fake_store.items,
+            "queued": task_id in self.fake_store.items,
+            "task_id": task_id,
+            "reason": None if task_id in self.fake_store.items else "task_not_found",
+        }
         self.client = TestClient(self.server.app)
 
         login_res = self.client.post("/api/auth/login", json={"login": "admin", "password": "admin"})
@@ -162,6 +169,15 @@ class MemoryExecutorApiTest(unittest.TestCase):
                 "period_sec": 3600,
                 "request_text": "Summarize events",
                 "todo_title": None,
+                "temperature": 0.4,
+                "top_p": 0.9,
+                "repetition_penalty": 1.2,
+                "max_tokens": 2000,
+                "seed": 42,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "top_k": 40,
+                "min_p": 0.05,
                 "execution_policy": "idle",
             }
         }
@@ -176,6 +192,15 @@ class MemoryExecutorApiTest(unittest.TestCase):
         list_items = list_res.json().get("items") or []
         self.assertEqual(len(list_items), 1)
         self.assertEqual(str(list_items[0].get("id") or ""), task_id)
+        self.assertEqual(list_items[0].get("temperature"), 0.4)
+        self.assertEqual(list_items[0].get("top_p"), 0.9)
+        self.assertEqual(list_items[0].get("repetition_penalty"), 1.2)
+        self.assertEqual(list_items[0].get("max_tokens"), 2000)
+        self.assertEqual(list_items[0].get("seed"), 42)
+        self.assertEqual(list_items[0].get("presence_penalty"), 0.1)
+        self.assertEqual(list_items[0].get("frequency_penalty"), 0.2)
+        self.assertEqual(list_items[0].get("top_k"), 40)
+        self.assertEqual(list_items[0].get("min_p"), 0.05)
 
         update_payload = {
             "task": {
@@ -186,6 +211,15 @@ class MemoryExecutorApiTest(unittest.TestCase):
                 "period_sec": 7200,
                 "request_text": "Summarize and compact",
                 "todo_title": "todo",
+                "temperature": 0.1,
+                "top_p": 0.5,
+                "repetition_penalty": 1.05,
+                "max_tokens": 777,
+                "seed": 7,
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.4,
+                "top_k": 12,
+                "min_p": 0.07,
                 "execution_policy": "always",
             }
         }
@@ -194,6 +228,15 @@ class MemoryExecutorApiTest(unittest.TestCase):
         updated = update_res.json().get("item") or {}
         self.assertEqual(updated.get("name"), "nightly-summary-updated")
         self.assertFalse(bool(updated.get("enabled")))
+        self.assertEqual(updated.get("temperature"), 0.1)
+        self.assertEqual(updated.get("top_p"), 0.5)
+        self.assertEqual(updated.get("repetition_penalty"), 1.05)
+        self.assertEqual(updated.get("max_tokens"), 777)
+        self.assertEqual(updated.get("seed"), 7)
+        self.assertEqual(updated.get("presence_penalty"), 0.3)
+        self.assertEqual(updated.get("frequency_penalty"), 0.4)
+        self.assertEqual(updated.get("top_k"), 12)
+        self.assertEqual(updated.get("min_p"), 0.07)
 
         delete_res = self.client.delete(f"/api/memory-executor/tasks/{task_id}")
         self.assertEqual(delete_res.status_code, 200)
@@ -211,6 +254,27 @@ class MemoryExecutorApiTest(unittest.TestCase):
         self.assertEqual(int(data.get("called", 0)), 1)
         self.assertEqual(int(data.get("failed", 0)), 0)
         self.assertEqual(self.server.orchestrator.last_runtime.get("envid"), "prod")
+
+    def test_run_selected_task_endpoint(self) -> None:
+        item = self.fake_store.create_task(
+            {
+                "name": "nightly-summary",
+                "enabled": True,
+                "envid": "",
+                "muid": "chat-1",
+                "period_sec": 3600,
+                "request_text": "Summarize events",
+                "todo_title": None,
+                "execution_policy": "idle",
+            }
+        )
+        task_id = str(item.get("id") or "")
+        res = self.client.post(f"/api/memory-executor/tasks/{task_id}/run", json={})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data.get("ok"))
+        self.assertTrue(bool(data.get("queued")))
+        self.assertEqual(str(data.get("task_id") or ""), task_id)
 
 
 if __name__ == "__main__":

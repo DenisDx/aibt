@@ -127,7 +127,19 @@
         "apiKey": "${LLM_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "${LLM_MODEL:-gpt-4o-mini}", "name": "${LLM_MODEL:-gpt-4o-mini}" }
+          {
+            "id": "${LLM_MODEL:-gpt-4o-mini}",
+            "name": "${LLM_MODEL:-gpt-4o-mini}",
+            "temperature": 0.4,
+            "top_p": 0.9,
+            "repetition_penalty": 1.2,
+            "max_tokens": 20000,
+            "seed": 42,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "top_k": 40,
+            "min_p": 0.05
+          }
         ]
       }
     },

@@ -127,6 +127,9 @@
     .memoryd-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
     .memoryd-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .memoryd-toolbar select, .memoryd-toolbar input, .memoryd-panel input, .memoryd-panel textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+    .memoryd-request-params-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .memoryd-request-param { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .memoryd-request-param label { font-size: 12px; color: var(--muted); }
     .memoryd-types { display: flex; gap: 8px; flex-wrap: wrap; }
     .memoryd-types label { font-size: 12px; }
     .memoryd-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
@@ -150,6 +153,7 @@
     .memory-executor-splitter.dragging { background: linear-gradient(to right, transparent 0, var(--accent) 45%, var(--accent) 55%, transparent 100%); }
     .memory-executor-form { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; }
     .memory-executor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .memory-executor-llm-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .memory-executor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
     .memory-executor-field label { font-size: 12px; color: var(--muted); }
     .memory-executor-field input,
@@ -209,6 +213,8 @@
       .memory-executor-right { flex-basis: auto; }
       .memory-executor-splitter { display: none; }
       .memory-executor-grid { grid-template-columns: 1fr; }
+      .memoryd-request-params-grid { grid-template-columns: 1fr; }
+      .memory-executor-llm-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -504,6 +510,45 @@
           <textarea id="memoryd-source-context" rows="6" placeholder='{"agent":"chat_group_helper"}'></textarea>
           <label for="memoryd-final-response">Final response</label>
           <textarea id="memoryd-final-response" rows="4" placeholder="Assistant response text..."></textarea>
+          <div class="card-label">LLM request overrides</div>
+          <div class="memoryd-request-params-grid">
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-temperature">Temperature</label>
+              <input id="memoryd-field-temperature" type="number" step="any" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-top-p">Top P</label>
+              <input id="memoryd-field-top-p" type="number" step="any" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-repetition-penalty">Repetition penalty</label>
+              <input id="memoryd-field-repetition-penalty" type="number" step="any" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-max-tokens">Max tokens</label>
+              <input id="memoryd-field-max-tokens" type="number" min="1" step="1" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-seed">Seed</label>
+              <input id="memoryd-field-seed" type="number" step="1" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-presence-penalty">Presence penalty</label>
+              <input id="memoryd-field-presence-penalty" type="number" step="any" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-frequency-penalty">Frequency penalty</label>
+              <input id="memoryd-field-frequency-penalty" type="number" step="any" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-top-k">Top K</label>
+              <input id="memoryd-field-top-k" type="number" step="1" placeholder="(optional)">
+            </div>
+            <div class="memoryd-request-param">
+              <label for="memoryd-field-min-p">Min P</label>
+              <input id="memoryd-field-min-p" type="number" step="any" placeholder="(optional)">
+            </div>
+          </div>
           <div class="memoryd-toolbar">
             <button class="btn" onclick="memorydEnqueueTask()">Enqueue</button>
             <button class="btn" onclick="memorydRefreshEnvids()">Reload Config</button>
@@ -563,7 +608,8 @@
             <button class="btn" onclick="memoryExecutorPrepareNewTask()">New Task</button>
             <button class="btn" onclick="memoryExecutorSaveTask()">Save Task</button>
             <button class="btn btn-danger" onclick="memoryExecutorDeleteTask()">Delete Task</button>
-            <button class="btn" onclick="memoryExecutorRunNow()">Run Now</button>
+            <button class="btn" onclick="memoryExecutorRunTaskNow()">Run Task</button>
+            <button class="btn" onclick="memoryExecutorRunNow()">Run Due</button>
           </div>
           <span id="memory-executor-msg" class="nav-whoami"></span>
           <div id="memory-executor-meta" class="agent-meta">Memory Executor status: unknown</div>
@@ -619,6 +665,44 @@
               <div class="memory-executor-field">
                 <label for="memory-executor-field-model">Model</label>
                 <input id="memory-executor-field-model" type="text" placeholder="(optional)">
+              </div>
+              <div class="memory-executor-llm-grid">
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-temperature">Temperature</label>
+                  <input id="memory-executor-field-temperature" type="number" step="any" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-top-p">Top P</label>
+                  <input id="memory-executor-field-top-p" type="number" step="any" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-repetition-penalty">Repetition penalty</label>
+                  <input id="memory-executor-field-repetition-penalty" type="number" step="any" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-max-tokens">Max tokens</label>
+                  <input id="memory-executor-field-max-tokens" type="number" min="1" step="1" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-seed">Seed</label>
+                  <input id="memory-executor-field-seed" type="number" step="1" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-presence-penalty">Presence penalty</label>
+                  <input id="memory-executor-field-presence-penalty" type="number" step="any" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-frequency-penalty">Frequency penalty</label>
+                  <input id="memory-executor-field-frequency-penalty" type="number" step="any" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-top-k">Top K</label>
+                  <input id="memory-executor-field-top-k" type="number" step="1" placeholder="(optional)">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-min-p">Min P</label>
+                  <input id="memory-executor-field-min-p" type="number" step="any" placeholder="(optional)">
+                </div>
               </div>
               <div class="memory-executor-field">
                 <label for="memory-executor-field-tools">Tools (comma-separated, empty = null)</label>
