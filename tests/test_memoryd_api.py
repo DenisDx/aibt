@@ -103,7 +103,9 @@ class MemorydApiTest(unittest.TestCase):
             "temperature": 0.4,
             "top_p": 0.9,
             "repetition_penalty": 1.2,
+            "repeat_last_n": 256,
             "max_tokens": 2000,
+            "num_predict": 512,
             "seed": 42,
             "presence_penalty": 0.1,
             "frequency_penalty": 0.2,
@@ -120,7 +122,9 @@ class MemorydApiTest(unittest.TestCase):
         self.assertEqual(self.fake_memoryd.last_enqueue.get("temperature"), 0.4)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("top_p"), 0.9)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("repetition_penalty"), 1.2)
+        self.assertEqual(self.fake_memoryd.last_enqueue.get("repeat_last_n"), 256)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("max_tokens"), 2000)
+        self.assertEqual(self.fake_memoryd.last_enqueue.get("num_predict"), 512)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("seed"), 42)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("presence_penalty"), 0.1)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("frequency_penalty"), 0.2)

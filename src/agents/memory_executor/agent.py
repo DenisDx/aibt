@@ -148,7 +148,9 @@ class MemoryExecutorStore:
         task["temperature"] = self._normalize_optional_float(task.get("temperature"))
         task["top_p"] = self._normalize_optional_float(task.get("top_p"))
         task["repetition_penalty"] = self._normalize_optional_float(task.get("repetition_penalty"))
+        task["repeat_last_n"] = self._normalize_optional_int(task.get("repeat_last_n"))
         task["max_tokens"] = self._normalize_optional_int(task.get("max_tokens"))
+        task["num_predict"] = self._normalize_optional_int(task.get("num_predict"))
         task["seed"] = self._normalize_optional_int(task.get("seed"))
         task["presence_penalty"] = self._normalize_optional_float(task.get("presence_penalty"))
         task["frequency_penalty"] = self._normalize_optional_float(task.get("frequency_penalty"))
@@ -188,7 +190,9 @@ class MemoryExecutorStore:
                       temperature DOUBLE PRECISION,
                       top_p DOUBLE PRECISION,
                       repetition_penalty DOUBLE PRECISION,
+                      repeat_last_n INTEGER,
                       max_tokens INTEGER,
+                      num_predict INTEGER,
                       seed BIGINT,
                       presence_penalty DOUBLE PRECISION,
                       frequency_penalty DOUBLE PRECISION,
@@ -210,7 +214,9 @@ class MemoryExecutorStore:
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS top_p DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS repetition_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS repeat_last_n INTEGER")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS max_tokens INTEGER")
+                cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS num_predict INTEGER")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS seed BIGINT")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS presence_penalty DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memory_executor_tasks ADD COLUMN IF NOT EXISTS frequency_penalty DOUBLE PRECISION")
@@ -322,13 +328,13 @@ class MemoryExecutorStore:
                     """
                     INSERT INTO memory_executor_tasks(
                                             id, name, enabled, envid, muid, period_sec, todo_title, request_text,
-                                            provider, model, temperature, top_p, repetition_penalty, max_tokens,
-                                            seed, presence_penalty, frequency_penalty, top_k, min_p,
+                                                                                        provider, model, temperature, top_p, repetition_penalty, repeat_last_n, max_tokens, num_predict,
+                                                                                        seed, presence_penalty, frequency_penalty, top_k, min_p,
                                             tools, context_types, update_types, execution_policy,
                                             enqueue_key, last_run_at
                     ) VALUES (
                       %s, %s, %s, %s, %s, %s, %s, %s,
-                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                                                                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
                                             %s, NULL
                     )
                     RETURNING *
@@ -347,7 +353,9 @@ class MemoryExecutorStore:
                         task["temperature"],
                         task["top_p"],
                         task["repetition_penalty"],
+                        task["repeat_last_n"],
                         task["max_tokens"],
+                        task["num_predict"],
                         task["seed"],
                         task["presence_penalty"],
                         task["frequency_penalty"],
@@ -386,7 +394,9 @@ class MemoryExecutorStore:
                         temperature=%s,
                         top_p=%s,
                         repetition_penalty=%s,
+                        repeat_last_n=%s,
                         max_tokens=%s,
+                        num_predict=%s,
                         seed=%s,
                         presence_penalty=%s,
                         frequency_penalty=%s,
@@ -414,7 +424,9 @@ class MemoryExecutorStore:
                         task["temperature"],
                         task["top_p"],
                         task["repetition_penalty"],
+                        task["repeat_last_n"],
                         task["max_tokens"],
+                        task["num_predict"],
                         task["seed"],
                         task["presence_penalty"],
                         task["frequency_penalty"],
@@ -636,7 +648,7 @@ class MemoryExecutorAgent(AgentBase):
         if execution_policy == "idle":
             provider = str(task.get("provider") or "").strip() or memoryd_service._active_provider()
             model = memoryd_service._resolve_model_for_provider(provider, str(task.get("model") or "").strip() or None)
-            if provider == "openaix":
+            if memoryd_service._provider_api(provider) == "openaix":
                 priority = int(memoryd_service._memoryd_model_cfg().get("memory_task_prio", 0))
                 queue_state = memoryd_service._queue_state(provider, model, priority)
                 if not queue_state or not bool(queue_state.get("can_run_now", False)):
@@ -739,7 +751,9 @@ class MemoryExecutorAgent(AgentBase):
             temperature=task.get("temperature"),
             top_p=task.get("top_p"),
             repetition_penalty=task.get("repetition_penalty"),
+            repeat_last_n=task.get("repeat_last_n"),
             max_tokens=task.get("max_tokens"),
+            num_predict=task.get("num_predict"),
             seed=task.get("seed"),
             presence_penalty=task.get("presence_penalty"),
             frequency_penalty=task.get("frequency_penalty"),

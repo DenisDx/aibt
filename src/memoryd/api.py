@@ -236,6 +236,13 @@ class MemorydService:
         cfg = providers.get(provider, {})
         return cfg if isinstance(cfg, dict) else {}
 
+    def _provider_api(self, provider: str | None = None) -> str:
+        """Return normalized API mode for one configured provider."""
+
+        provider_name = str(provider or "").strip() or self._active_provider()
+        provider_cfg = self._provider_cfg(provider_name)
+        return str(provider_cfg.get("api", "") or "").strip().lower()
+
     def _active_provider(self) -> str:
         md_cfg = self._memoryd_model_cfg()
         provider = str(md_cfg.get("provider") or "").strip()
@@ -459,7 +466,9 @@ class MemorydService:
         temperature: float | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        repeat_last_n: int | None = None,
         max_tokens: int | None = None,
+        num_predict: int | None = None,
         seed: int | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
@@ -507,7 +516,9 @@ class MemorydService:
         norm_temperature = None if temperature is None or str(temperature).strip() == "" else float(temperature)
         norm_top_p = None if top_p is None or str(top_p).strip() == "" else float(top_p)
         norm_repetition_penalty = None if repetition_penalty is None or str(repetition_penalty).strip() == "" else float(repetition_penalty)
+        norm_repeat_last_n = None if repeat_last_n is None or str(repeat_last_n).strip() == "" else int(repeat_last_n)
         norm_max_tokens = None if max_tokens is None or str(max_tokens).strip() == "" else int(max_tokens)
+        norm_num_predict = None if num_predict is None or str(num_predict).strip() == "" else int(num_predict)
         norm_seed = None if seed is None or str(seed).strip() == "" else int(seed)
         norm_presence_penalty = None if presence_penalty is None or str(presence_penalty).strip() == "" else float(presence_penalty)
         norm_frequency_penalty = None if frequency_penalty is None or str(frequency_penalty).strip() == "" else float(frequency_penalty)
@@ -543,7 +554,9 @@ class MemorydService:
                 "temperature": norm_temperature,
                 "top_p": norm_top_p,
                 "repetition_penalty": norm_repetition_penalty,
+                "repeat_last_n": norm_repeat_last_n,
                 "max_tokens": norm_max_tokens,
+                "num_predict": norm_num_predict,
                 "seed": norm_seed,
                 "presence_penalty": norm_presence_penalty,
                 "frequency_penalty": norm_frequency_penalty,
@@ -848,7 +861,9 @@ class MemorydService:
             temperature = task.get("temperature")
             top_p = task.get("top_p")
             repetition_penalty = task.get("repetition_penalty")
+            repeat_last_n = task.get("repeat_last_n")
             max_tokens = task.get("max_tokens")
+            num_predict = task.get("num_predict")
             seed = task.get("seed")
             presence_penalty = task.get("presence_penalty")
             frequency_penalty = task.get("frequency_penalty")
@@ -893,8 +908,12 @@ class MemorydService:
                 build_kwargs["top_p"] = top_p
             if repetition_penalty is not None:
                 build_kwargs["repetition_penalty"] = repetition_penalty
+            if repeat_last_n is not None:
+                build_kwargs["repeat_last_n"] = repeat_last_n
             if max_tokens is not None:
                 build_kwargs["max_tokens"] = max_tokens
+            if num_predict is not None:
+                build_kwargs["num_predict"] = num_predict
             if seed is not None:
                 build_kwargs["seed"] = seed
             if presence_penalty is not None:
@@ -969,7 +988,7 @@ class MemorydService:
             provider = self._active_provider()
             model = self._active_model()
             priority = int(task.get("prio", self._memoryd_model_cfg().get("memory_task_prio", 0)))
-            if provider == "openaix":
+            if self._provider_api(provider) == "openaix":
                 queue_state = self._queue_state(provider, model, priority)
                 if not queue_state or not bool(queue_state.get("can_run_now", False)):
                     continue

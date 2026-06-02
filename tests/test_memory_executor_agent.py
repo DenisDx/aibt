@@ -5,6 +5,8 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
+from datetime import timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
@@ -93,7 +95,9 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
             "temperature": 0.4,
             "top_p": 0.9,
             "repetition_penalty": 1.2,
+            "repeat_last_n": 256,
             "max_tokens": 1234,
+            "num_predict": 512,
             "seed": 42,
             "presence_penalty": 0.1,
             "frequency_penalty": 0.2,
@@ -120,7 +124,9 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
         self.assertEqual(svc.last.get("temperature"), 0.4)
         self.assertEqual(svc.last.get("top_p"), 0.9)
         self.assertEqual(svc.last.get("repetition_penalty"), 1.2)
+        self.assertEqual(svc.last.get("repeat_last_n"), 256)
         self.assertEqual(svc.last.get("max_tokens"), 1234)
+        self.assertEqual(svc.last.get("num_predict"), 512)
         self.assertEqual(svc.last.get("seed"), 42)
         self.assertEqual(svc.last.get("presence_penalty"), 0.1)
         self.assertEqual(svc.last.get("frequency_penalty"), 0.2)
@@ -161,6 +167,60 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
         )
         self.assertTrue(queued)
         self.assertEqual((svc.last.get("source_context") or {}).get("query"), "scan vendor launches")
+
+    def test_process_task_idle_uses_provider_api_mode_for_openaix_queue_state(self) -> None:
+        class _Store:
+            @staticmethod
+            def count_inflight_tasks_by_caller_prefix(prefix):
+                _ = prefix
+                return 0
+
+        class _Svc:
+            def __init__(self):
+                self.store = _Store()
+                self.queue_state_calls = []
+
+            @staticmethod
+            def _active_provider():
+                return "default"
+
+            @staticmethod
+            def _provider_api(provider):
+                _ = provider
+                return "openaix"
+
+            @staticmethod
+            def _resolve_model_for_provider(provider, model=None):
+                _ = provider
+                return str(model or "gpt-test")
+
+            @staticmethod
+            def _memoryd_model_cfg():
+                return {"memory_task_prio": 8}
+
+            def _queue_state(self, provider, model, priority):
+                self.queue_state_calls.append((provider, model, priority))
+                return {"can_run_now": False}
+
+        svc = _Svc()
+        task = {
+            "id": "task-3",
+            "muid": "muid-1",
+            "request_text": "prompt text",
+            "execution_policy": "idle",
+            "provider": "default",
+            "model": "gpt-test",
+        }
+
+        outcome = self.agent._process_task(
+            task=task,
+            now_utc=datetime.now(timezone.utc),
+            memoryd_service=svc,
+        )
+
+        self.assertTrue(outcome.temp_deferred)
+        self.assertEqual(outcome.queued_count, 0)
+        self.assertEqual(svc.queue_state_calls, [("default", "gpt-test", 8)])
 
 
 if __name__ == "__main__":

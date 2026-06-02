@@ -1116,7 +1116,9 @@ async function memorydEnqueueTask() {
       temperature: readOptionalNumber('memoryd-field-temperature'),
       top_p: readOptionalNumber('memoryd-field-top-p'),
       repetition_penalty: readOptionalNumber('memoryd-field-repetition-penalty'),
+      repeat_last_n: readOptionalNumber('memoryd-field-repeat-last-n', true),
       max_tokens: readOptionalNumber('memoryd-field-max-tokens', true),
+      num_predict: readOptionalNumber('memoryd-field-num-predict', true),
       seed: readOptionalNumber('memoryd-field-seed', true),
       presence_penalty: readOptionalNumber('memoryd-field-presence-penalty'),
       frequency_penalty: readOptionalNumber('memoryd-field-frequency-penalty'),
@@ -1490,7 +1492,9 @@ function renderMemoryExecutorSelectedTask() {
   setText('memory-executor-field-temperature', task.temperature == null ? '' : task.temperature);
   setText('memory-executor-field-top-p', task.top_p == null ? '' : task.top_p);
   setText('memory-executor-field-repetition-penalty', task.repetition_penalty == null ? '' : task.repetition_penalty);
+  setText('memory-executor-field-repeat-last-n', task.repeat_last_n == null ? '' : task.repeat_last_n);
   setText('memory-executor-field-max-tokens', task.max_tokens == null ? '' : task.max_tokens);
+  setText('memory-executor-field-num-predict', task.num_predict == null ? '' : task.num_predict);
   setText('memory-executor-field-seed', task.seed == null ? '' : task.seed);
   setText('memory-executor-field-presence-penalty', task.presence_penalty == null ? '' : task.presence_penalty);
   setText('memory-executor-field-frequency-penalty', task.frequency_penalty == null ? '' : task.frequency_penalty);
@@ -1520,7 +1524,9 @@ function memoryExecutorNewTaskTemplate() {
     temperature: null,
     top_p: null,
     repetition_penalty: null,
+    repeat_last_n: null,
     max_tokens: null,
+    num_predict: null,
     seed: null,
     presence_penalty: null,
     frequency_penalty: null,
@@ -1597,7 +1603,9 @@ function memoryExecutorReadTaskFromForm() {
     temperature: readOptionalNumber('memory-executor-field-temperature'),
     top_p: readOptionalNumber('memory-executor-field-top-p'),
     repetition_penalty: readOptionalNumber('memory-executor-field-repetition-penalty'),
+    repeat_last_n: readOptionalNumber('memory-executor-field-repeat-last-n', true),
     max_tokens: readOptionalNumber('memory-executor-field-max-tokens', true),
+    num_predict: readOptionalNumber('memory-executor-field-num-predict', true),
     seed: readOptionalNumber('memory-executor-field-seed', true),
     presence_penalty: readOptionalNumber('memory-executor-field-presence-penalty'),
     frequency_penalty: readOptionalNumber('memory-executor-field-frequency-penalty'),

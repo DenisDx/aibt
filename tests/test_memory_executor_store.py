@@ -39,7 +39,9 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
                 "temperature": " 0.4 ",
                 "top_p": "0.9",
                 "repetition_penalty": " 1.2 ",
+                "repeat_last_n": " 256 ",
                 "max_tokens": "2000",
+                "num_predict": " 512 ",
                 "seed": " 42 ",
                 "presence_penalty": " 0.1 ",
                 "frequency_penalty": "0.2",
@@ -57,7 +59,9 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0.4)
         self.assertEqual(payload["top_p"], 0.9)
         self.assertEqual(payload["repetition_penalty"], 1.2)
+        self.assertEqual(payload["repeat_last_n"], 256)
         self.assertEqual(payload["max_tokens"], 2000)
+        self.assertEqual(payload["num_predict"], 512)
         self.assertEqual(payload["seed"], 42)
         self.assertEqual(payload["presence_penalty"], 0.1)
         self.assertEqual(payload["frequency_penalty"], 0.2)
@@ -80,7 +84,9 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
                 "temperature": " \t ",
                 "top_p": " ",
                 "repetition_penalty": "\t",
+                "repeat_last_n": "\t",
                 "max_tokens": "   ",
+                "num_predict": " ",
                 "seed": " ",
                 "presence_penalty": "\t ",
                 "frequency_penalty": "",
@@ -98,7 +104,9 @@ class MemoryExecutorStoreNormalizeTest(unittest.TestCase):
         self.assertIsNone(payload["temperature"])
         self.assertIsNone(payload["top_p"])
         self.assertIsNone(payload["repetition_penalty"])
+        self.assertIsNone(payload["repeat_last_n"])
         self.assertIsNone(payload["max_tokens"])
+        self.assertIsNone(payload["num_predict"])
         self.assertIsNone(payload["seed"])
         self.assertIsNone(payload["presence_penalty"])
         self.assertIsNone(payload["frequency_penalty"])

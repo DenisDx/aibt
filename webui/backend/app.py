@@ -137,7 +137,9 @@ class MemorydEnqueueRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     repetition_penalty: float | None = None
+    repeat_last_n: int | None = None
     max_tokens: int | None = None
+    num_predict: int | None = None
     seed: int | None = None
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
@@ -1217,7 +1219,9 @@ class WebUIServer:
                     temperature=body.temperature,
                     top_p=body.top_p,
                     repetition_penalty=body.repetition_penalty,
+                    repeat_last_n=body.repeat_last_n,
                     max_tokens=body.max_tokens,
+                    num_predict=body.num_predict,
                     seed=body.seed,
                     presence_penalty=body.presence_penalty,
                     frequency_penalty=body.frequency_penalty,

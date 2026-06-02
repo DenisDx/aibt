@@ -14,7 +14,9 @@ _MODEL_REQUEST_PARAM_KEYS = (
     "temperature",
     "top_p",
     "repetition_penalty",
+    "repeat_last_n",
     "max_tokens",
+    "num_predict",
     "seed",
     "presence_penalty",
     "frequency_penalty",
@@ -30,6 +32,14 @@ _DIRECT_REQUEST_PARAM_KEYS = (
     "frequency_penalty",
 )
 _MODEL_KWARG_REQUEST_PARAM_KEYS = ("repetition_penalty", "top_k", "min_p")
+_MODEL_KWARG_REQUEST_PARAM_KEYS = ("repetition_penalty", "repeat_last_n", "num_predict", "top_k", "min_p")
+_UNSUPPORTED_REQUEST_PARAM_KEYS_BY_API = {
+    "openai-completions": frozenset(_MODEL_KWARG_REQUEST_PARAM_KEYS),
+}
+_EXTRA_BODY_REQUEST_PARAM_KEYS_BY_API = {
+    "openaix": frozenset(_MODEL_KWARG_REQUEST_PARAM_KEYS),
+    "ollama": frozenset(_MODEL_KWARG_REQUEST_PARAM_KEYS),
+}
 
 
 def _first_model_id(provider_cfg: dict[str, Any]) -> str | None:
@@ -70,7 +80,9 @@ def _resolve_model_request_params(
     temperature: Any = _UNSET,
     top_p: Any = _UNSET,
     repetition_penalty: Any = _UNSET,
+    repeat_last_n: Any = _UNSET,
     max_tokens: Any = _UNSET,
+    num_predict: Any = _UNSET,
     seed: Any = _UNSET,
     presence_penalty: Any = _UNSET,
     frequency_penalty: Any = _UNSET,
@@ -83,7 +95,9 @@ def _resolve_model_request_params(
         "temperature": temperature,
         "top_p": top_p,
         "repetition_penalty": repetition_penalty,
+        "repeat_last_n": repeat_last_n,
         "max_tokens": max_tokens,
+        "num_predict": num_predict,
         "seed": seed,
         "presence_penalty": presence_penalty,
         "frequency_penalty": frequency_penalty,
@@ -103,6 +117,30 @@ def _resolve_model_request_params(
     return resolved
 
 
+def _filter_request_params_for_api(provider_cfg: dict[str, Any], request_params: dict[str, Any]) -> dict[str, Any]:
+    """Drop request parameters unsupported by the provider API mode."""
+
+    if not isinstance(request_params, dict) or not request_params:
+        return {}
+    api_name = str(provider_cfg.get("api", "") or "").strip().lower()
+    unsupported = _UNSUPPORTED_REQUEST_PARAM_KEYS_BY_API.get(api_name, frozenset())
+    if not unsupported:
+        return dict(request_params)
+    return {key: value for key, value in request_params.items() if key not in unsupported}
+
+
+def _extra_body_request_params_for_api(provider_cfg: dict[str, Any], request_params: dict[str, Any]) -> dict[str, Any]:
+    """Return provider-specific parameters that must be sent under extra_body."""
+
+    if not isinstance(request_params, dict) or not request_params:
+        return {}
+    api_name = str(provider_cfg.get("api", "") or "").strip().lower()
+    extra_body_keys = _EXTRA_BODY_REQUEST_PARAM_KEYS_BY_API.get(api_name, frozenset())
+    if not extra_body_keys:
+        return {}
+    return {key: value for key, value in request_params.items() if key in extra_body_keys}
+
+
 def build_llm(
     config: dict[str, Any],
     provider: str | None = None,
@@ -111,7 +149,9 @@ def build_llm(
     temperature: Any = _UNSET,
     top_p: Any = _UNSET,
     repetition_penalty: Any = _UNSET,
+    repeat_last_n: Any = _UNSET,
     max_tokens: Any = _UNSET,
+    num_predict: Any = _UNSET,
     seed: Any = _UNSET,
     presence_penalty: Any = _UNSET,
     frequency_penalty: Any = _UNSET,
@@ -150,18 +190,22 @@ def build_llm(
         temperature=temperature,
         top_p=top_p,
         repetition_penalty=repetition_penalty,
+        repeat_last_n=repeat_last_n,
         max_tokens=max_tokens,
+        num_predict=num_predict,
         seed=seed,
         presence_penalty=presence_penalty,
         frequency_penalty=frequency_penalty,
         top_k=top_k,
         min_p=min_p,
     )
+    request_params = _filter_request_params_for_api(provider_cfg, request_params)
+    extra_body = _extra_body_request_params_for_api(provider_cfg, request_params)
     model_kwargs: dict[str, Any] = {}
     if tools is not _UNSET:
         model_kwargs["tools"] = tools
     for key in _MODEL_KWARG_REQUEST_PARAM_KEYS:
-        if key in request_params:
+        if key in request_params and key not in extra_body:
             model_kwargs[key] = request_params[key]
 
     init_kwargs: dict[str, Any] = {
@@ -171,6 +215,8 @@ def build_llm(
         "http_client": get_sync_http_client(),
         "http_async_client": get_async_http_client(),
     }
+    if extra_body:
+        init_kwargs["extra_body"] = extra_body
     if model_kwargs:
         init_kwargs["model_kwargs"] = model_kwargs
     for key in _DIRECT_REQUEST_PARAM_KEYS:

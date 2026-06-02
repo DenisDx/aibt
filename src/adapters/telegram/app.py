@@ -422,14 +422,49 @@ class TelegramAdapter(Adapter):
         chat = getattr(update, "effective_chat", None)
         user = getattr(update, "effective_user", None)
         message = getattr(update, "effective_message", None)
+        self._log_dialog_event_data(
+            chat_id=getattr(chat, "id", None),
+            chat_type=getattr(chat, "type", None),
+            chat_name=self._chat_name(update),
+            user_id=getattr(user, "id", None),
+            username=getattr(user, "username", None),
+            message_id=getattr(message, "message_id", None),
+            incoming_text=incoming_text,
+            response_text=response_text,
+            response_sent=response_sent,
+            error=error,
+            event=event,
+        )
+
+    def _log_dialog_event_data(
+        self,
+        *,
+        chat_id: int | None,
+        chat_type: str | None,
+        chat_name: str | None,
+        user_id: int | None,
+        username: str | None,
+        message_id: int | None,
+        incoming_text: str,
+        response_text: str | None,
+        response_sent: bool,
+        error: str | None,
+        event: str = "message",
+    ) -> None:
+        """Write one dialog record from explicit primitive values.
+
+        Input: explicit dialog event fields.
+        Output: one JSON log line in the dialog log.
+        """
+
         payload = {
             "event": event,
-            "chat_id": getattr(chat, "id", None),
-            "chat_type": getattr(chat, "type", None),
-            "chat_name": self._chat_name(update),
-            "user_id": getattr(user, "id", None),
-            "username": getattr(user, "username", None),
-            "message_id": getattr(message, "message_id", None),
+            "chat_id": chat_id,
+            "chat_type": chat_type,
+            "chat_name": chat_name,
+            "user_id": user_id,
+            "username": username,
+            "message_id": message_id,
             "incoming_text": incoming_text,
             "response_text": response_text,
             "response_sent": response_sent,
@@ -456,6 +491,85 @@ class TelegramAdapter(Adapter):
         reply_to = int(match.group(1))
         cleaned = (raw[: match.start()] + raw[match.end() :]).strip()
         return cleaned, reply_to
+
+    @staticmethod
+    def _normalize_task_result(result: dict[str, Any] | None) -> tuple[str | None, int | None, str | None]:
+        """Normalize one completed task result for Telegram delivery.
+
+        Input: orchestrator task result payload.
+        Output: `(response_text, reply_to_message_id, skip_reason)`.
+        """
+
+        if isinstance(result, dict) and bool(result.get("skip_send", False)):
+            return (None, None, str(result.get("skip_reason", "ignored_by_model_decision")))
+
+        if isinstance(result, dict):
+            response_text: Any = result.get("result") or result.get("error") or "No response"
+        else:
+            response_text = result or "No response"
+
+        if isinstance(response_text, dict):
+            response_text = str(response_text)
+        response_text, reply_to_message_id = TelegramAdapter._extract_reply_marker(str(response_text))
+        clean_text = str(response_text or "").strip() or "No response"
+        return (clean_text, reply_to_message_id, None)
+
+    async def _deliver_task_result_late(
+        self,
+        *,
+        task_id: str,
+        chat_id: int,
+        incoming_text: str,
+        username: str,
+        late_timeout_seconds: float,
+        poll_interval: float = 0.5,
+    ) -> None:
+        """Wait for one timed-out task and deliver its eventual Telegram reply.
+
+        Input: task id, chat id, request metadata, and timing settings.
+        Output: none; sends the reply if the task finishes before the late deadline.
+        """
+
+        deadline = asyncio.get_running_loop().time() + max(1.0, float(late_timeout_seconds))
+        safe_interval = max(0.05, float(poll_interval))
+        while asyncio.get_running_loop().time() < deadline:
+            task = self.orchestrator.get_task(task_id)
+            if task and task.get("status") in ("done", "error"):
+                result = task.get("result") or {"error": "no result"}
+                response_text, reply_to_message_id, skip_reason = self._normalize_task_result(result)
+                if skip_reason:
+                    log("adapters.telegram", "info", f"late delivery skipped for task {task_id}: {skip_reason}")
+                    return
+
+                log(
+                    "adapters.telegram",
+                    "info",
+                    f"late task completion for chat={chat_id} user={username}: delivering delayed response",
+                )
+                sent = await self.send_message(chat_id, str(response_text), reply_to_message_id=reply_to_message_id)
+                if sent:
+                    self._remember_recent_assistant_message(chat_id, str(response_text))
+                self._log_dialog_event_data(
+                    chat_id=chat_id,
+                    chat_type=None,
+                    chat_name=str(chat_id),
+                    user_id=None,
+                    username=username,
+                    message_id=None,
+                    incoming_text=incoming_text,
+                    response_text=str(response_text),
+                    response_sent=sent,
+                    error=None if sent else "send_message_failed",
+                    event="late_message",
+                )
+                return
+            await asyncio.sleep(safe_interval)
+
+        log(
+            "adapters.telegram",
+            "warning",
+            f"late delivery expired after {late_timeout_seconds:.1f}s for task {task_id} chat={chat_id}",
+        )
 
 
     async def handle(self, user_id: str, agent_id: str, message: str, context: dict = None) -> dict:
@@ -549,7 +663,16 @@ class TelegramAdapter(Adapter):
             await asyncio.sleep(poll_interval)
 
         log("adapters.telegram", "warning", f"task timeout after {timeout_seconds}s: {task_id}")
-        return {"skip_send": True, "skip_reason": "timeout"}
+        asyncio.create_task(
+            self._deliver_task_result_late(
+                task_id=task_id,
+                chat_id=chat_id,
+                incoming_text=message,
+                username=str(context.get("username", "") or f"user_{chat_id}"),
+                late_timeout_seconds=max(30, timeout_seconds * 3),
+            )
+        )
+        return {"skip_send": True, "skip_reason": "timeout_waiting_late_delivery"}
 
     async def send_typing_action(self, chat_id: int) -> bool:
         """
@@ -793,12 +916,16 @@ class TelegramAdapter(Adapter):
                 return
             
             # Send response back to Telegram
-            response_text = result.get("result") or result.get("error") or "No response"
-            if isinstance(response_text, dict):
-                response_text = str(response_text)
-            response_text, reply_to_message_id = self._extract_reply_marker(str(response_text))
-            if not str(response_text).strip():
-                response_text = "No response"
+            response_text, reply_to_message_id, skip_reason = self._normalize_task_result(result)
+            if skip_reason:
+                self._log_dialog_event(
+                    update=update,
+                    incoming_text=text,
+                    response_text=None,
+                    response_sent=False,
+                    error=skip_reason,
+                )
+                return
             
             log("adapters.telegram", "debug", f"sending response to user {username}")
             sent = await self.send_message(chat_id, str(response_text), reply_to_message_id=reply_to_message_id)

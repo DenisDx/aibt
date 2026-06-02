@@ -172,7 +172,9 @@ class MemoryExecutorApiTest(unittest.TestCase):
                 "temperature": 0.4,
                 "top_p": 0.9,
                 "repetition_penalty": 1.2,
+                "repeat_last_n": 256,
                 "max_tokens": 2000,
+                "num_predict": 512,
                 "seed": 42,
                 "presence_penalty": 0.1,
                 "frequency_penalty": 0.2,
@@ -195,7 +197,9 @@ class MemoryExecutorApiTest(unittest.TestCase):
         self.assertEqual(list_items[0].get("temperature"), 0.4)
         self.assertEqual(list_items[0].get("top_p"), 0.9)
         self.assertEqual(list_items[0].get("repetition_penalty"), 1.2)
+        self.assertEqual(list_items[0].get("repeat_last_n"), 256)
         self.assertEqual(list_items[0].get("max_tokens"), 2000)
+        self.assertEqual(list_items[0].get("num_predict"), 512)
         self.assertEqual(list_items[0].get("seed"), 42)
         self.assertEqual(list_items[0].get("presence_penalty"), 0.1)
         self.assertEqual(list_items[0].get("frequency_penalty"), 0.2)
@@ -214,7 +218,9 @@ class MemoryExecutorApiTest(unittest.TestCase):
                 "temperature": 0.1,
                 "top_p": 0.5,
                 "repetition_penalty": 1.05,
+                "repeat_last_n": 128,
                 "max_tokens": 777,
+                "num_predict": 333,
                 "seed": 7,
                 "presence_penalty": 0.3,
                 "frequency_penalty": 0.4,
@@ -231,7 +237,9 @@ class MemoryExecutorApiTest(unittest.TestCase):
         self.assertEqual(updated.get("temperature"), 0.1)
         self.assertEqual(updated.get("top_p"), 0.5)
         self.assertEqual(updated.get("repetition_penalty"), 1.05)
+        self.assertEqual(updated.get("repeat_last_n"), 128)
         self.assertEqual(updated.get("max_tokens"), 777)
+        self.assertEqual(updated.get("num_predict"), 333)
         self.assertEqual(updated.get("seed"), 7)
         self.assertEqual(updated.get("presence_penalty"), 0.3)
         self.assertEqual(updated.get("frequency_penalty"), 0.4)

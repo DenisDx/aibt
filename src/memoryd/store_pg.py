@@ -114,7 +114,9 @@ class MemorydStore:
                                                                     temperature DOUBLE PRECISION,
                                                                     top_p DOUBLE PRECISION,
                                                                     repetition_penalty DOUBLE PRECISION,
+                                                                    repeat_last_n INTEGER,
                                                                     max_tokens INTEGER,
+                                                                    num_predict INTEGER,
                                                                     seed BIGINT,
                                                                     presence_penalty DOUBLE PRECISION,
                                                                     frequency_penalty DOUBLE PRECISION,
@@ -142,7 +144,9 @@ class MemorydStore:
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS top_p DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS repetition_penalty DOUBLE PRECISION")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS repeat_last_n INTEGER")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS max_tokens INTEGER")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS num_predict INTEGER")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS seed BIGINT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS presence_penalty DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS frequency_penalty DOUBLE PRECISION")
@@ -473,7 +477,9 @@ class MemorydStore:
         temperature = task.get("temperature")
         top_p = task.get("top_p")
         repetition_penalty = task.get("repetition_penalty")
+        repeat_last_n = task.get("repeat_last_n")
         max_tokens = task.get("max_tokens")
+        num_predict = task.get("num_predict")
         seed = task.get("seed")
         presence_penalty = task.get("presence_penalty")
         frequency_penalty = task.get("frequency_penalty")
@@ -490,7 +496,9 @@ class MemorydStore:
                 f"temperature={temperature if temperature is not None else '<default>'} "
                 f"top_p={top_p if top_p is not None else '<default>'} "
                 f"repetition_penalty={repetition_penalty if repetition_penalty is not None else '<default>'} "
+                f"repeat_last_n={repeat_last_n if repeat_last_n is not None else '<default>'} "
                 f"max_tokens={max_tokens if max_tokens is not None else '<default>'} "
+                f"num_predict={num_predict if num_predict is not None else '<default>'} "
                 f"seed={seed if seed is not None else '<default>'} "
                 f"presence_penalty={presence_penalty if presence_penalty is not None else '<default>'} "
                 f"frequency_penalty={frequency_penalty if frequency_penalty is not None else '<default>'} "
@@ -510,10 +518,10 @@ class MemorydStore:
                     """
                     INSERT INTO memoryd_tasks(
                                             task_id, muid, caller_tag, work_hash, request_text, provider, model,
-                                            temperature, top_p, repetition_penalty, max_tokens,
+                                            temperature, top_p, repetition_penalty, repeat_last_n, max_tokens, num_predict,
                                             seed, presence_penalty, frequency_penalty, top_k, min_p,
                                             tools, context_types, requested_types, source_context, final_response, status, prio
-                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                     """,
                     (
                         task["task_id"],
@@ -526,7 +534,9 @@ class MemorydStore:
                                                 task.get("temperature"),
                                                 task.get("top_p"),
                                                 task.get("repetition_penalty"),
+                                                task.get("repeat_last_n"),
                                                 task.get("max_tokens"),
+                                                task.get("num_predict"),
                                                 task.get("seed"),
                                                 task.get("presence_penalty"),
                                                 task.get("frequency_penalty"),
