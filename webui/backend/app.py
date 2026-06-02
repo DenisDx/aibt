@@ -1245,6 +1245,24 @@ class WebUIServer:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @app.get("/api/memoryd/tasks")
+        async def api_memoryd_tasks(
+            envid: str = "",
+            limit: int = 200,
+            offset: int = 0,
+            session: dict = Depends(require),
+        ):
+            try:
+                svc = self._memoryd_service_for_envid(envid.strip() or None)
+                page = svc.list_active_tasks(
+                    envid=envid.strip() or None,
+                    limit=max(1, min(500, int(limit))),
+                    offset=max(0, int(offset)),
+                )
+                return {"ok": True, **page}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @app.post("/api/memoryd/records/upsert")
         async def api_memoryd_record_upsert(body: MemorydUpsertRecordRequest, session: dict = Depends(require)):
             try:

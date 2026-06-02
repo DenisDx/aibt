@@ -48,7 +48,7 @@ def normalize_types(types: list[Any] | None, allowed_types: list[str] | None = N
     Output: sorted unique normalized types.
     """
 
-    log("memoryd", "info", "call memoryd.schemas.normalize_types")
+    log("memoryd", "debug", "call memoryd.schemas.normalize_types")
     if types is None:
         return sorted({clean_text(t) for t in (allowed_types or []) if clean_text(t)})
 
@@ -71,7 +71,7 @@ def normalize_muid(muid: Any) -> str:
     Output: canonical MUID string.
     """
 
-    log("memoryd", "info", "call memoryd.schemas.normalize_muid")
+    log("memoryd", "debug", "call memoryd.schemas.normalize_muid")
     return clean_text(muid)
 
 
@@ -118,7 +118,7 @@ def serialize_json(value: Any) -> str:
     Output: JSON text.
     """
 
-    log("memoryd", "info", "call memoryd.schemas.serialize_json")
+    log("memoryd", "debug", "call memoryd.schemas.serialize_json")
     return json.dumps(normalize_json_value(value), ensure_ascii=False, separators=(",", ":"), default=str)
 
 
@@ -129,7 +129,7 @@ def deserialize_json(value: Any, default: Any = None) -> Any:
     Output: Python value.
     """
 
-    log("memoryd", "info", "call memoryd.schemas.deserialize_json")
+    log("memoryd", "debug", "call memoryd.schemas.deserialize_json")
     if value is None:
         return default
     if isinstance(value, (dict, list, int, float, bool)):

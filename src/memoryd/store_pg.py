@@ -109,6 +109,7 @@ class MemorydStore:
                       caller_tag TEXT,
                                             work_hash TEXT,
                                             request_text TEXT,
+                                                                                        phase TEXT,
                                             provider TEXT,
                                             model TEXT,
                                                                     temperature DOUBLE PRECISION,
@@ -141,6 +142,7 @@ class MemorydStore:
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS work_hash TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS provider TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS model TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS phase TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS top_p DOUBLE PRECISION")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS repetition_penalty DOUBLE PRECISION")
@@ -517,11 +519,11 @@ class MemorydStore:
                 cur.execute(
                     """
                     INSERT INTO memoryd_tasks(
-                                            task_id, muid, caller_tag, work_hash, request_text, provider, model,
+                                            task_id, muid, caller_tag, work_hash, request_text, phase, provider, model,
                                             temperature, top_p, repetition_penalty, repeat_last_n, max_tokens, num_predict,
                                             seed, presence_penalty, frequency_penalty, top_k, min_p,
                                             tools, context_types, requested_types, source_context, final_response, status, prio
-                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                     """,
                     (
                         task["task_id"],
@@ -529,6 +531,7 @@ class MemorydStore:
                         task.get("caller_tag"),
                         task.get("work_hash"),
                         task.get("request_text"),
+                        task.get("phase") or "queued",
                                                 task.get("provider"),
                                                 task.get("model"),
                                                 task.get("temperature"),
@@ -630,6 +633,41 @@ class MemorydStore:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
+    def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+        """List pending and running memoryd tasks.
+
+        Input: optional envid filter and page bounds.
+        Output: page with active task rows.
+        """
+
+        where = ["status IN ('pending','running')"]
+        params: list[Any] = []
+        clean_envid = str(envid or "").strip()
+        if clean_envid:
+            where.append("COALESCE(source_context->>'envid', '') = %s")
+            params.append(clean_envid)
+        where_sql = "WHERE " + " AND ".join(where)
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) AS count FROM memoryd_tasks {where_sql}",
+                    tuple(params),
+                )
+                total = int((cur.fetchone() or {}).get("count", 0) or 0)
+                cur.execute(
+                    (
+                        "SELECT * FROM memoryd_tasks "
+                        f"{where_sql} "
+                        "ORDER BY created_at ASC, task_id ASC "
+                        "LIMIT %s OFFSET %s"
+                    ),
+                    tuple(params + [safe_limit, safe_offset]),
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+                return {"items": rows, "total": total, "limit": safe_limit, "offset": safe_offset}
+
     def mark_task_running(self, task_id: str) -> bool:
         """Mark a pending task as running.
 
@@ -642,12 +680,44 @@ class MemorydStore:
                 cur.execute(
                     """
                     UPDATE memoryd_tasks
-                    SET status='running', started_at=COALESCE(started_at, now()), updated_at=now(), retry_count=retry_count+1
+                    SET status='running', phase='running', started_at=COALESCE(started_at, now()), updated_at=now(), retry_count=retry_count+1, error=NULL
                     WHERE task_id=%s AND status='pending'
                     """,
                     (task_id,),
                 )
                 return bool(cur.rowcount)
+
+    def update_task_phase(self, task_id: str, phase: str, conn: Any | None = None) -> None:
+        """Update the current task phase without changing task status.
+
+        Input: task id and phase label.
+        Output: none.
+        """
+
+        clean_phase = str(phase or "").strip()[:255]
+        if not clean_phase:
+            return
+        if conn is not None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE memoryd_tasks
+                    SET phase=%s, updated_at=now()
+                    WHERE task_id=%s
+                    """,
+                    (clean_phase, task_id),
+                )
+            return
+        with self._conn() as own_conn:
+            with own_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE memoryd_tasks
+                    SET phase=%s, updated_at=now()
+                    WHERE task_id=%s
+                    """,
+                    (clean_phase, task_id),
+                )
 
     def mark_task_done(self, task_id: str, conn: Any | None = None) -> None:
         """Mark a task as done.
@@ -661,7 +731,7 @@ class MemorydStore:
                 cur.execute(
                     """
                     UPDATE memoryd_tasks
-                    SET status='done', finished_at=now(), error=NULL, updated_at=now()
+                    SET status='done', phase='done', finished_at=now(), error=NULL, updated_at=now()
                     WHERE task_id=%s
                     """,
                     (task_id,),
@@ -672,7 +742,7 @@ class MemorydStore:
                 cur.execute(
                     """
                     UPDATE memoryd_tasks
-                    SET status='done', finished_at=now(), error=NULL, updated_at=now()
+                    SET status='done', phase='done', finished_at=now(), error=NULL, updated_at=now()
                     WHERE task_id=%s
                     """,
                     (task_id,),
@@ -690,7 +760,7 @@ class MemorydStore:
                 cur.execute(
                     """
                     UPDATE memoryd_tasks
-                    SET status='failed', finished_at=now(), error=%s, updated_at=now()
+                    SET status='failed', phase='failed', finished_at=now(), error=%s, updated_at=now()
                     WHERE task_id=%s
                     """,
                     (error[:4000], task_id),
@@ -708,7 +778,7 @@ class MemorydStore:
                 cur.execute(
                     """
                     UPDATE memoryd_tasks
-                    SET status='skipped', finished_at=now(), error=%s, updated_at=now()
+                    SET status='skipped', phase='skipped', finished_at=now(), error=%s, updated_at=now()
                     WHERE task_id=%s
                     """,
                     ((error or "")[:4000], task_id),
@@ -730,7 +800,7 @@ class MemorydStore:
 
 
 def _instrument_memoryd_store_calls() -> None:
-    """Wrap MemorydStore methods to emit info logs on each call."""
+    """Wrap MemorydStore methods to emit debug logs on each call."""
 
     for name, attr in list(MemorydStore.__dict__.items()):
         if name.startswith("__"):
@@ -745,7 +815,7 @@ def _instrument_memoryd_store_calls() -> None:
         def _make_wrapper(fn: Any, fn_name: str):
             @wraps(fn)
             def _wrapped(self, *args, **kwargs):
-                log("memoryd", "info", f"call memoryd.store.{fn_name}")
+                log("memoryd", "debug", f"call memoryd.store.{fn_name}")
                 return fn(self, *args, **kwargs)
 
             setattr(_wrapped, "_memoryd_call_logged", True)

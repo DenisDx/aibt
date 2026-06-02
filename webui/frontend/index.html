@@ -137,6 +137,19 @@
     .memoryd-table th { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.03); }
     .memoryd-table td { border-bottom: 1px solid var(--border); }
     .memoryd-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; min-height: 180px; max-height: 380px; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .memoryd-tasks-layout { display: flex; gap: 0; min-height: 0; height: 100%; }
+    .memoryd-tasks-left { min-width: 280px; flex: 0 0 30%; }
+    .memoryd-tasks-right { min-width: 320px; flex: 1 1 auto; min-height: 0; }
+    .memoryd-task-output { flex: 1 1 auto; min-height: 0; height: 100%; max-height: none; resize: none; }
+    .memoryd-tasks-splitter {
+      flex: 0 0 8px;
+      cursor: col-resize;
+      background: linear-gradient(to right, transparent 0, var(--border) 45%, var(--border) 55%, transparent 100%);
+      user-select: none;
+      touch-action: none;
+    }
+    .memoryd-tasks-splitter:hover,
+    .memoryd-tasks-splitter.dragging { background: linear-gradient(to right, transparent 0, var(--accent) 45%, var(--accent) 55%, transparent 100%); }
 
     /* ── Memory Executor page ─────────────────────────────── */
     .memory-executor-layout { display: flex; gap: 0; min-height: 0; height: 100%; }
@@ -209,6 +222,10 @@
       .chat-msg { max-width: 95%; }
       .alog-layout { grid-template-columns: 1fr; }
       .memoryd-layout { grid-template-columns: 1fr; }
+      .memoryd-tasks-layout { flex-direction: column; }
+      .memoryd-tasks-left,
+      .memoryd-tasks-right { flex-basis: auto; }
+      .memoryd-tasks-splitter { display: none; }
       .memory-executor-layout { flex-direction: column; }
       .memory-executor-right { flex-basis: auto; }
       .memory-executor-splitter { display: none; }
@@ -246,6 +263,7 @@
     <button class="nav-tab" onclick="showPage('agentlog')">Agent Log</button>
     <button class="nav-tab" onclick="showPage('memory')">Memory</button>
     <button class="nav-tab" onclick="showPage('memoryd')">MemoryD</button>
+    <button class="nav-tab" onclick="showPage('memorydtasks')">MemoryD Tasks</button>
     <button id="nav-tab-memoryexecutor" class="nav-tab" onclick="showPage('memoryexecutor')">Memory Executor</button>
     <button class="nav-tab" onclick="showPage('langgraph')">LangGraph</button>
     <button class="nav-tab" onclick="showPage('settings')" title="Coming in a future phase">Settings</button>
@@ -591,6 +609,54 @@
           </div>
           <label for="memoryd-record-output">Selected record JSON</label>
           <textarea id="memoryd-record-output" class="memoryd-output"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Memoryd tasks page -->
+    <div id="page-memorydtasks" class="page">
+      <div id="memoryd-tasks-layout" class="memoryd-tasks-layout">
+        <div class="memoryd-panel memoryd-tasks-left">
+          <div class="memoryd-toolbar">
+            <label for="memoryd-tasks-envid-select">Envid</label>
+            <select id="memoryd-tasks-envid-select" onchange="loadMemorydTasksPage(true)"></select>
+          </div>
+          <div class="memoryd-toolbar">
+            <label for="memoryd-tasks-limit">Limit</label>
+            <input id="memoryd-tasks-limit" type="number" min="1" max="500" value="200" style="width:90px;">
+            <button class="btn" onclick="loadMemorydTasksPage(true)">Refresh</button>
+          </div>
+          <span id="memoryd-tasks-msg" class="nav-whoami"></span>
+          <div id="memoryd-tasks-meta" class="agent-meta">Memoryd tasks status: unknown</div>
+
+          <div class="memoryd-table-wrap">
+            <table class="memoryd-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Phase</th>
+                  <th>Watchdog</th>
+                  <th>MUID</th>
+                  <th>Created</th>
+                  <th>Request</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody id="memoryd-task-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="memoryd-tasks-splitter" class="memoryd-tasks-splitter" aria-hidden="true"></div>
+
+        <div class="memoryd-panel memoryd-tasks-right">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div class="card-label">Task fields</div>
+            <span class="nav-spacer"></span>
+            <span id="memoryd-task-meta" class="nav-whoami">No task selected.</span>
+          </div>
+          <label for="memoryd-task-output">Selected task JSON</label>
+          <textarea id="memoryd-task-output" class="memoryd-output memoryd-task-output"></textarea>
         </div>
       </div>
     </div>

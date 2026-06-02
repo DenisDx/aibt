@@ -26,10 +26,33 @@ class _FakeMemorydService:
 
     def __init__(self) -> None:
         self.last_enqueue = None
+        self.last_list_active_tasks = None
 
     def enqueue_update(self, **kwargs):
         self.last_enqueue = dict(kwargs)
         return {"ok": True, "queued": True, "task_id": "task-1"}
+
+    def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0):
+        self.last_list_active_tasks = {"envid": envid, "limit": limit, "offset": offset}
+        return {
+            "items": [
+                {
+                    "task_id": "task-1",
+                    "status": "pending",
+                    "muid": "chat-1",
+                    "caller_tag": "manual-test",
+                    "request_text": "Summarize recent dialogue and update semantic memory.",
+                    "provider": "openaix",
+                    "model": "gpt-test",
+                    "envid": envid,
+                    "created_at": "2026-06-02T09:00:00Z",
+                    "requested_types": ["semantic"],
+                }
+            ],
+            "total": 1,
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 class _FakeWebUIAdapter:
@@ -130,6 +153,18 @@ class MemorydApiTest(unittest.TestCase):
         self.assertEqual(self.fake_memoryd.last_enqueue.get("frequency_penalty"), 0.2)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("top_k"), 40)
         self.assertEqual(self.fake_memoryd.last_enqueue.get("min_p"), 0.05)
+
+    def test_memoryd_tasks_lists_active_items(self) -> None:
+        res = self.client.get("/api/memoryd/tasks?envid=prod&limit=50&offset=10")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(self.fake_memoryd.last_list_active_tasks, {"envid": "prod", "limit": 50, "offset": 10})
+        self.assertEqual(data.get("total"), 1)
+        items = data.get("items") or []
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].get("status"), "pending")
+        self.assertEqual(items[0].get("request_text"), "Summarize recent dialogue and update semantic memory.")
 
 
 if __name__ == "__main__":

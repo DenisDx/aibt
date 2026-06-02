@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 from functools import wraps
 import json
 import os
@@ -148,6 +149,28 @@ def _extract_json_payload(content: Any) -> Any:
         raise ValueError(f"invalid JSON payload format: {e}") from e
 
 
+def _to_utc_datetime(value: Any) -> datetime | None:
+    """Convert DB/API datetime-like values to timezone-aware UTC datetimes."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class MemorydService:
     """Main memoryd facade.
 
@@ -164,6 +187,7 @@ class MemorydService:
         self._initialized = False
         self._muid_lock_conns: dict[str, Any] = {}
         self._dispatch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memoryd-dispatch")
+        self._watchdog_warned: dict[str, str] = {}
 
     def initialize(self) -> None:
         """Prepare database schema.
@@ -220,6 +244,143 @@ class MemorydService:
 
         self.initialize()
         return self.store.list_muids(limit=max(1, int(limit)))
+
+    def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+        """Return pending and running memoryd tasks.
+
+        Input: optional envid filter and page bounds.
+        Output: page with normalized task rows.
+        """
+
+        self.initialize()
+        page = self.store.list_active_tasks(envid=envid, limit=max(1, int(limit)), offset=max(0, int(offset)))
+        items: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        watchdog_seconds = self._running_watchdog_seconds()
+        for row in page.get("items", []):
+            item = dict(row)
+            item["requested_types"] = deserialize_json(item.get("requested_types"), []) or []
+            item["context_types"] = deserialize_json(item.get("context_types"), []) or []
+            item["tools"] = deserialize_json(item.get("tools"), None)
+            item["source_context"] = deserialize_json(item.get("source_context"), {}) or {}
+            source_context = item.get("source_context") if isinstance(item.get("source_context"), dict) else {}
+            item["envid"] = str(source_context.get("envid") or "").strip() or None
+            status = str(item.get("status") or "").strip().lower()
+            phase = str(item.get("phase") or "").strip().lower() or ("running" if status == "running" else "queued")
+            item["phase"] = phase
+            created_at = _to_utc_datetime(item.get("created_at"))
+            started_at = _to_utc_datetime(item.get("started_at"))
+            updated_at = _to_utc_datetime(item.get("updated_at"))
+            if created_at is not None:
+                item["queued_seconds"] = max(0, int((now - created_at).total_seconds()))
+            if started_at is not None:
+                item["running_seconds"] = max(0, int((now - started_at).total_seconds()))
+            if updated_at is not None:
+                item["phase_age_seconds"] = max(0, int((now - updated_at).total_seconds()))
+            item["watchdog_threshold_seconds"] = watchdog_seconds
+            item["reason"] = self._task_reason_for_display(item)
+            watchdog_state = "idle"
+            watchdog_message = ""
+            if status == "pending":
+                if phase in {"waiting_provider_queue", "waiting_muid_lock", "dispatch_schedule_failed", "dispatch_attempt_failed"}:
+                    watchdog_state = "waiting"
+                    watchdog_message = item["reason"]
+            elif status == "running":
+                running_seconds = int(item.get("running_seconds", 0) or 0)
+                if watchdog_seconds > 0 and running_seconds >= watchdog_seconds:
+                    watchdog_state = "overdue"
+                    watchdog_message = (
+                        f"Running for {running_seconds}s at phase={phase} "
+                        f"(threshold={watchdog_seconds}s)"
+                    )
+                else:
+                    watchdog_state = "ok"
+                    watchdog_message = f"Running for {running_seconds}s at phase={phase}"
+            item["watchdog_state"] = watchdog_state
+            item["watchdog_message"] = watchdog_message
+            items.append(item)
+        return {
+            "items": items,
+            "total": int(page.get("total", 0) or 0),
+            "limit": int(page.get("limit", limit) or limit),
+            "offset": int(page.get("offset", offset) or offset),
+        }
+
+    def _running_watchdog_seconds(self) -> int:
+        """Return watchdog threshold for running tasks in seconds."""
+
+        cfg = self._memoryd_model_cfg()
+        value = cfg.get("running_watchdog_seconds", cfg.get("task_watchdog_seconds", 120)) if isinstance(cfg, dict) else 120
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 120
+
+    def _task_reason_for_display(self, task: dict[str, Any]) -> str:
+        """Build a short human-readable reason for active-task state."""
+
+        error = str(task.get("error") or "").strip()
+        if error:
+            return error
+        phase = str(task.get("phase") or "").strip().lower()
+        mapping = {
+            "queued": "Queued for execution.",
+            "dispatch_scheduled_async": "Immediate dispatch was submitted asynchronously.",
+            "waiting_provider_queue": "Waiting for provider queue capacity.",
+            "waiting_muid_lock": "Waiting for same-MUID task lock.",
+            "running": "Task has started execution.",
+            "build_snapshot": "Building memory snapshot.",
+            "build_messages": "Building LLM input messages.",
+            "build_llm": "Constructing LLM client.",
+            "invoke_llm": "Waiting for LLM response.",
+            "parse_mutations": "Parsing model output into memory mutations.",
+            "apply_mutations": "Applying memory mutations.",
+            "done": "Task completed successfully.",
+            "dispatch_schedule_failed": "Immediate dispatch scheduling failed; task will wait for the next tick.",
+            "dispatch_attempt_failed": "Immediate dispatch attempt failed; task will wait for the next tick.",
+        }
+        return mapping.get(phase, "")
+
+    def monitor_running_tasks(self) -> dict[str, Any]:
+        """Log overdue running tasks once per phase/update signature."""
+
+        page = self.list_active_tasks(limit=500, offset=0)
+        warned = 0
+        active_running: set[str] = set()
+        for item in page.get("items", []):
+            if str(item.get("status") or "").strip().lower() != "running":
+                continue
+            task_id = str(item.get("task_id") or "")
+            if not task_id:
+                continue
+            active_running.add(task_id)
+            if str(item.get("watchdog_state") or "") != "overdue":
+                continue
+            signature = "|".join(
+                [
+                    str(item.get("phase") or ""),
+                    str(item.get("updated_at") or ""),
+                    str(item.get("started_at") or ""),
+                ]
+            )
+            if self._watchdog_warned.get(task_id) == signature:
+                continue
+            self._watchdog_warned[task_id] = signature
+            log(
+                "memoryd",
+                "warning",
+                (
+                    "memoryd running task watchdog "
+                    f"task_id={task_id} muid={item.get('muid')} phase={item.get('phase')} "
+                    f"running_seconds={item.get('running_seconds', 0)} threshold={item.get('watchdog_threshold_seconds', 0)} "
+                    f"reason={item.get('watchdog_message') or item.get('reason') or '<none>'}"
+                ),
+            )
+            warned += 1
+        for task_id in list(self._watchdog_warned.keys()):
+            if task_id not in active_running:
+                self._watchdog_warned.pop(task_id, None)
+        return {"warned": warned, "running": len(active_running)}
 
     def _memoryd_model_cfg(self) -> dict[str, Any]:
         return self.memoryd_cfg if isinstance(self.memoryd_cfg, dict) else {}
@@ -527,11 +688,21 @@ class MemorydService:
         if norm_work_hash is not None:
             inflight = self.store.find_inflight_tasks(muid, caller_tag=norm_caller_tag, work_hash=norm_work_hash)
             if inflight:
+                existing_task_id = str(inflight[0].get("task_id") or "")
+                log(
+                    "memoryd",
+                    "info",
+                    (
+                        "memoryd enqueue skipped duplicate inflight task "
+                        f"muid={muid} caller_tag={norm_caller_tag or '<none>'} work_hash={norm_work_hash} "
+                        f"existing_task_id={existing_task_id} reason=duplicate_inflight"
+                    ),
+                )
                 return {
                     "ok": True,
                     "queued": False,
                     "reason": "duplicate_inflight",
-                    "task_id": str(inflight[0].get("task_id") or ""),
+                    "task_id": existing_task_id,
                     "muid": muid,
                     "types": resolved_types,
                 }
@@ -549,6 +720,7 @@ class MemorydService:
                 "caller_tag": norm_caller_tag,
                 "work_hash": norm_work_hash,
                 "request_text": norm_request_text,
+                "phase": "queued",
                 "provider": norm_provider,
                 "model": norm_model,
                 "temperature": norm_temperature,
@@ -591,16 +763,31 @@ class MemorydService:
                 ),
             )
         except Exception as e:
-            log("memoryd", "warning", f"memoryd immediate dispatch attempt failed for task_id={task_id}: {e}")
+            reason = f"immediate dispatch attempt failed: {e}"
+            self.store.update_task_phase(task_id, "dispatch_attempt_failed")
+            self.store.update_task_error(task_id, reason)
+            log("memoryd", "info", f"memoryd immediate dispatch attempt failed for task_id={task_id} reason={e}")
 
     def _dispatch_after_enqueue_async(self, task_id: str) -> None:
         """Schedule immediate worker tick without blocking request/response path."""
 
         try:
-            self._dispatch_executor.submit(self._dispatch_after_enqueue, task_id)
-            log("memoryd", "info", f"memoryd immediate dispatch scheduled asynchronously for task_id={task_id}")
+            future = self._dispatch_executor.submit(self._dispatch_after_enqueue, task_id)
+            self.store.update_task_phase(task_id, "dispatch_scheduled_async")
+            self.store.update_task_error(task_id, "")
+            log(
+                "memoryd",
+                "info",
+                (
+                    "memoryd immediate dispatch scheduled asynchronously "
+                    f"for task_id={task_id} future_done={future.done()} wait=0 reason=submit_returned"
+                ),
+            )
         except Exception as e:
-            log("memoryd", "warning", f"memoryd immediate dispatch scheduling failed for task_id={task_id}: {e}")
+            reason = f"immediate dispatch scheduling failed: {e}"
+            self.store.update_task_phase(task_id, "dispatch_schedule_failed")
+            self.store.update_task_error(task_id, reason)
+            log("memoryd", "info", f"memoryd immediate dispatch scheduling failed for task_id={task_id} reason={e}")
 
     def upsert_record(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Insert or update one record.
@@ -850,6 +1037,7 @@ class MemorydService:
 
     def _process_task(self, task: dict[str, Any]) -> dict[str, Any]:
         muid = str(task.get("muid") or "").strip().lower()
+        task_id = str(task.get("task_id") or "")
         requested_types = [str(x).strip().lower() for x in (deserialize_json(task.get("requested_types"), []) or []) if str(x).strip()]
         context_types = [str(x).strip().lower() for x in (deserialize_json(task.get("context_types"), []) or []) if str(x).strip()]
         request_override = str(task.get("request_text") or "").strip()
@@ -872,30 +1060,52 @@ class MemorydService:
             if request_override:
                 request_text = request_override
                 if not request_text:
+                    self.store.update_task_phase(task_id, "skipped_empty_request_override")
                     self.store.mark_task_skipped(task["task_id"], "request_text override is set but empty")
                     return {"status": "skipped", "pruned": 0}
                 log(
                     "memoryd",
                     "info",
-                    f"memoryd task uses request_text override for task_id={task.get('task_id')} muid={muid} request_text_len={len(request_text)}",
+                    f"memoryd task uses request_text override for task_id={task_id} muid={muid} request_text_len={len(request_text)}",
                 )
             else:
                 request_file = self._resolve_request_file_for_task(task, requested_types)
                 if not request_file:
+                    self.store.update_task_phase(task_id, "skipped_no_request_file")
                     self.store.mark_task_skipped(task["task_id"], "no exact request_file for requested_types")
                     log(
                         "memoryd",
                         "warning",
-                        f"memoryd task skipped: no exact request_file for task_id={task.get('task_id')} muid={muid} types={requested_types}",
+                        f"memoryd task skipped: no exact request_file for task_id={task_id} muid={muid} types={requested_types}",
                     )
                     return {"status": "skipped", "pruned": 0}
 
                 request_text = self._load_request_text(request_file)
                 if not request_text:
+                    self.store.update_task_phase(task_id, "skipped_missing_request_file")
                     self.store.mark_task_skipped(task["task_id"], f"missing request file: {request_file}")
                     return {"status": "skipped", "pruned": 0}
 
+            self.store.update_task_phase(task_id, "build_snapshot")
+            log(
+                "memoryd",
+                "info",
+                (
+                    "memoryd task phase=build_snapshot "
+                    f"task_id={task_id} muid={muid} provider={provider} model={model} "
+                    f"requested_types={requested_types} context_types={context_types or requested_types}"
+                ),
+            )
             snapshot = self._record_snapshot(muid, context_types or requested_types, DEFAULT_MEMORYD_LIMIT_PER_TYPE)
+            self.store.update_task_phase(task_id, "build_messages")
+            log(
+                "memoryd",
+                "info",
+                (
+                    "memoryd task phase=build_messages "
+                    f"task_id={task_id} muid={muid} snapshot_items={len(snapshot)} request_text_len={len(request_text)}"
+                ),
+            )
             messages = self._build_llm_messages(request_text, task, snapshot)
 
             task_tools = deserialize_json(task.get("tools"), None)
@@ -924,6 +1134,15 @@ class MemorydService:
                 build_kwargs["top_k"] = top_k
             if min_p is not None:
                 build_kwargs["min_p"] = min_p
+            self.store.update_task_phase(task_id, "build_llm")
+            log(
+                "memoryd",
+                "info",
+                (
+                    "memoryd task phase=build_llm "
+                    f"task_id={task_id} muid={muid} provider={provider} model={model} tools_present={task_tools is not None}"
+                ),
+            )
             llm = build_llm(self.config, **build_kwargs)
             log_token = None
             if self._llm_logging_enabled():
@@ -934,23 +1153,43 @@ class MemorydService:
                     payload=None,
                 )
             try:
+                self.store.update_task_phase(task_id, "invoke_llm")
+                log(
+                    "memoryd",
+                    "info",
+                    f"memoryd task phase=invoke_llm task_id={task_id} muid={muid} messages={len(messages)}",
+                )
                 response = llm.invoke(messages)
             finally:
                 if log_token is not None:
                     pop_llm_log_context(log_token)
+            self.store.update_task_phase(task_id, "parse_mutations")
+            log(
+                "memoryd",
+                "info",
+                f"memoryd task phase=parse_mutations task_id={task_id} muid={muid}",
+            )
             mutations = self._parse_mutations(getattr(response, "content", response))
 
             with self.store._tx_conn() as tx_conn:
+                self.store.update_task_phase(task_id, "apply_mutations", conn=tx_conn)
                 for mutation in mutations:
                     self._apply_mutation(task, mutation, conn=tx_conn)
 
                 pruned = self._prune_after_task(muid, requested_types or self._enabled_types(), conn=tx_conn)
+                self.store.update_task_phase(task_id, "done", conn=tx_conn)
                 self.store.mark_task_done(task["task_id"], conn=tx_conn)
+            log(
+                "memoryd",
+                "info",
+                f"memoryd task phase=done task_id={task_id} muid={muid} mutations={len(mutations)} pruned={pruned}",
+            )
             return {"status": "done", "pruned": pruned, "mutations": len(mutations)}
         except Exception as e:
             err = str(e)
+            self.store.update_task_phase(task_id, "failed")
             self.store.mark_task_failed(task["task_id"], err)
-            log("memoryd", "error", f"memoryd task failed task_id={task.get('task_id')} muid={muid}: {err}")
+            log("memoryd", "error", f"memoryd task failed task_id={task_id} muid={muid}: {err}")
             return {"status": "failed", "error": err, "pruned": 0}
 
     def _resolve_model_for_provider(self, provider: str, model: str | None = None) -> str:
@@ -985,22 +1224,41 @@ class MemorydService:
 
         for task in tasks:
             muid = str(task.get("muid") or "").strip().lower()
+            task_id = str(task.get("task_id") or "")
             provider = self._active_provider()
             model = self._active_model()
             priority = int(task.get("prio", self._memoryd_model_cfg().get("memory_task_prio", 0)))
             if self._provider_api(provider) == "openaix":
                 queue_state = self._queue_state(provider, model, priority)
                 if not queue_state or not bool(queue_state.get("can_run_now", False)):
+                    self.store.update_task_phase(task_id, "waiting_provider_queue")
+                    self.store.update_task_error(
+                        task_id,
+                        (
+                            f"waiting for provider queue capacity: provider={provider} model={model} "
+                            f"priority={priority} queue_state={queue_state}"
+                        )[:4000],
+                    )
+                    log(
+                        "memoryd",
+                        "info",
+                        (
+                            "memoryd task waiting for provider queue "
+                            f"task_id={task_id} muid={muid} provider={provider} model={model} priority={priority} "
+                            f"queue_state={queue_state}"
+                        ),
+                    )
                     continue
 
             first_try = self._acquire_muid_lock(muid)
             if not first_try:
-                task_id = str(task.get("task_id") or "")
+                self.store.update_task_phase(task_id, "waiting_muid_lock")
+                self.store.update_task_error(task_id, f"waiting for same-MUID advisory lock for muid={muid}")
                 caller_tag = str(task.get("caller_tag") or "").strip() or "<none>"
                 lock_key = _muid_lock_key(muid)
                 log(
                     "memoryd",
-                    "warning",
+                    "info",
                     (
                         "same-MUID advisory lock contention "
                         f"task_id={task_id} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
@@ -1011,7 +1269,7 @@ class MemorydService:
                 if not second_try:
                     log(
                         "memoryd",
-                        "warning",
+                        "info",
                         (
                             "same-MUID advisory lock skip "
                             f"task_id={task_id} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
@@ -1022,10 +1280,13 @@ class MemorydService:
 
             try:
                 if not self.store.mark_task_running(task["task_id"]):
-                    log("memoryd", "warning", f"memoryd task race: task_id={task.get('task_id')} skipped")
+                    self.store.update_task_phase(task_id, "race_lost")
+                    self.store.update_task_error(task_id, "task state changed before mark_task_running")
+                    log("memoryd", "warning", f"memoryd task race: task_id={task_id} skipped")
                     counters["skipped"] += 1
                     continue
 
+                log("memoryd", "info", f"memoryd task marked running task_id={task_id} muid={muid}")
                 counters["started"] += 1
                 result = self._process_task(task)
                 status = result.get("status")
@@ -1046,7 +1307,7 @@ class MemorydService:
 
 
 def _instrument_memoryd_service_calls() -> None:
-    """Wrap MemorydService methods to emit info logs on each call."""
+    """Wrap MemorydService methods to emit debug logs on each call."""
 
     for name, attr in list(MemorydService.__dict__.items()):
         if name.startswith("__"):
@@ -1061,7 +1322,7 @@ def _instrument_memoryd_service_calls() -> None:
         def _make_wrapper(fn: Any, fn_name: str):
             @wraps(fn)
             def _wrapped(self, *args, **kwargs):
-                log("memoryd", "info", f"call memoryd.service.{fn_name}")
+                log("memoryd", "debug", f"call memoryd.service.{fn_name}")
                 return fn(self, *args, **kwargs)
 
             setattr(_wrapped, "_memoryd_call_logged", True)

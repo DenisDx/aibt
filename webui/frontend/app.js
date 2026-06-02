@@ -25,6 +25,9 @@ let _memorydRecords = [];
 let _memorydSelectedRecordId = '';
 let _memorydSelectedTypes = [];
 let _memorydCurrentEnvid = '';
+let _memorydTasks = [];
+let _memorydSelectedTaskId = '';
+let _memorydTasksSplitterReady = false;
 let _memoryExecutorTasks = [];
 let _memoryExecutorSelectedId = '';
 let _memoryExecutorTemplates = [];
@@ -108,6 +111,9 @@ function showPage(name) {
   } else if (name === 'memoryd') {
     _closeWs();
     loadMemorydPage();
+  } else if (name === 'memorydtasks') {
+    _closeWs();
+    loadMemorydTasksPage();
   } else if (name === 'memoryexecutor') {
     _closeWs();
     loadMemoryExecutorPage();
@@ -1195,6 +1201,169 @@ async function memorydSaveSelectedRecord() {
   } catch (e) {
     if (msg) msg.textContent = 'Save error: ' + (e.message || e);
   }
+}
+
+async function loadMemorydTasksPage(force = false) {
+  const meta = document.getElementById('memoryd-tasks-meta');
+  try {
+    setupMemorydTasksSplitter();
+    await loadMemorydTaskEnvids();
+    if (force || document.getElementById('page-memorydtasks')?.classList.contains('active')) {
+      await loadMemorydTasks();
+    }
+    const envid = String(document.getElementById('memoryd-tasks-envid-select')?.value || '').trim();
+    if (meta) meta.textContent = `Active tasks${envid ? ` · envid=${envid}` : ''} · ${_memorydTasks.length} loaded`;
+  } catch (e) {
+    if (meta) meta.textContent = 'Memoryd tasks error: ' + (e.message || e);
+  }
+}
+
+async function loadMemorydTaskEnvids() {
+  const sel = document.getElementById('memoryd-tasks-envid-select');
+  if (!sel) return;
+  const prev = String(sel.value || '').trim();
+  const data = await apiGet('/api/memoryd/envids');
+  const items = Array.isArray(data.items) ? data.items : [];
+  sel.innerHTML = '';
+
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = '(all envids)';
+  sel.appendChild(empty);
+
+  items.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = String(item.envid || '');
+    opt.textContent = `${item.title || item.envid}${item.enabled ? ' · on' : ' · off'}`;
+    sel.appendChild(opt);
+  });
+
+  if (prev && Array.from(sel.options).some(o => String(o.value || '') === prev)) {
+    sel.value = prev;
+  }
+}
+
+async function loadMemorydTasks() {
+  const sel = document.getElementById('memoryd-tasks-envid-select');
+  const limitEl = document.getElementById('memoryd-tasks-limit');
+  const out = document.getElementById('memoryd-task-output');
+  const msg = document.getElementById('memoryd-tasks-msg');
+  const envid = String(sel?.value || '').trim();
+  const rawLimit = Number(limitEl?.value || 200);
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.trunc(rawLimit))) : 200;
+  if (limitEl) limitEl.value = String(limit);
+  const qs = new URLSearchParams();
+  qs.set('limit', String(limit));
+  if (envid) qs.set('envid', envid);
+  try {
+    const data = await apiGet('/api/memoryd/tasks?' + qs.toString());
+    _memorydTasks = Array.isArray(data.items) ? data.items : [];
+    if (_memorydTasks.length) {
+      if (!_memorydTasks.some(t => String(t.task_id || '') === String(_memorydSelectedTaskId || ''))) {
+        _memorydSelectedTaskId = String(_memorydTasks[0].task_id || '');
+      }
+    } else {
+      _memorydSelectedTaskId = '';
+    }
+    _renderMemorydTasks();
+    _renderMemorydTaskDetail();
+    if (msg) msg.textContent = `Loaded ${Number(data.total || _memorydTasks.length)} active task(s)`;
+    if (out && !_memorydTasks.length) out.value = '';
+  } catch (e) {
+    if (out) out.value = 'Memoryd tasks error: ' + (e.message || e);
+  }
+}
+
+function _renderMemorydTasks() {
+  const body = document.getElementById('memoryd-task-table-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!_memorydTasks.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td colspan="7" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No active tasks found.</td>';
+    body.appendChild(row);
+    return;
+  }
+  _memorydTasks.forEach(task => {
+    const id = String(task.task_id || '');
+    const requestText = String(task.request_text || '');
+    const reason = String(task.reason || task.error || '');
+    const watchdog = String(task.watchdog_state || '');
+    const row = document.createElement('tr');
+    row.style.cursor = 'pointer';
+    row.onclick = () => {
+      _memorydSelectedTaskId = id;
+      _renderMemorydTasks();
+      _renderMemorydTaskDetail();
+    };
+    row.style.background = id === _memorydSelectedTaskId ? 'rgba(91,138,247,.12)' : 'transparent';
+    row.innerHTML =
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.status || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.phase || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(watchdog)}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.muid || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.created_at || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(requestText.slice(0, 100))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(reason.slice(0, 100))}</td>`;
+    body.appendChild(row);
+  });
+}
+
+function _renderMemorydTaskDetail() {
+  const out = document.getElementById('memoryd-task-output');
+  const meta = document.getElementById('memoryd-task-meta');
+  if (!out) return;
+  const selected = _memorydTasks.find(t => String(t.task_id || '') === String(_memorydSelectedTaskId || '')) || null;
+  out.value = selected ? JSON.stringify(selected, null, 2) : '';
+  if (meta) {
+    meta.textContent = selected
+      ? `Selected task ${selected.task_id} · ${selected.status || ''}/${selected.phase || ''} · ${selected.watchdog_message || selected.reason || 'no details'} · ${selected.provider || '<default>'}/${selected.model || '<default>'}`
+      : 'No task selected.';
+  }
+}
+
+function setupMemorydTasksSplitter() {
+  if (_memorydTasksSplitterReady) return;
+  const layout = document.getElementById('memoryd-tasks-layout');
+  const splitter = document.getElementById('memoryd-tasks-splitter');
+  const left = document.querySelector('.memoryd-tasks-left');
+  if (!layout || !splitter || !left) return;
+
+  let dragging = false;
+
+  const applyWidthFromX = (clientX) => {
+    const rect = layout.getBoundingClientRect();
+    const total = rect.width;
+    if (total <= 0) return;
+    const leftWidth = Math.max(280, Math.min(total * 0.75, clientX - rect.left));
+    const leftPct = (leftWidth / total) * 100;
+    left.style.flexBasis = `${leftPct.toFixed(2)}%`;
+  };
+
+  const onMove = (ev) => {
+    if (!dragging) return;
+    applyWidthFromX(ev.clientX);
+  };
+
+  const stopDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    document.body.style.cursor = '';
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', stopDrag);
+  };
+
+  splitter.addEventListener('mousedown', (ev) => {
+    dragging = true;
+    splitter.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', stopDrag);
+    ev.preventDefault();
+  });
+
+  _memorydTasksSplitterReady = true;
 }
 
 // ── MemoryExecutor page ───────────────────────────────────────────────────
