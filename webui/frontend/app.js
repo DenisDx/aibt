@@ -1280,13 +1280,14 @@ function _renderMemorydTasks() {
   body.innerHTML = '';
   if (!_memorydTasks.length) {
     const row = document.createElement('tr');
-    row.innerHTML = '<td colspan="7" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No active tasks found.</td>';
+    row.innerHTML = '<td colspan="8" style="padding:10px; color:var(--muted); border-bottom:1px solid var(--border);">No active tasks found.</td>';
     body.appendChild(row);
     return;
   }
   _memorydTasks.forEach(task => {
     const id = String(task.task_id || '');
     const requestText = String(task.request_text || '');
+    const callerTag = String(task.caller_tag || '');
     const reason = String(task.reason || task.error || '');
     const watchdog = String(task.watchdog_state || '');
     const row = document.createElement('tr');
@@ -1302,6 +1303,7 @@ function _renderMemorydTasks() {
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.phase || ''))}</td>` +
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(watchdog)}</td>` +
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.muid || ''))}</td>` +
+      `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(callerTag)}</td>` +
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(String(task.created_at || ''))}</td>` +
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(requestText.slice(0, 100))}</td>` +
       `<td style="padding:8px; border-bottom:1px solid var(--border);">${escapeHtml(reason.slice(0, 100))}</td>`;

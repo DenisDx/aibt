@@ -75,6 +75,27 @@ class AgentBase(ABC):
 
         return result
 
+    def _memoryd_caller_tag(self, ctx: dict[str, Any]) -> str | None:
+        """Resolve stable caller_tag for MemoryD enqueue dedup/replacement.
+
+        Input: request context.
+        Output: caller_tag string or None.
+        """
+
+        explicit = str(ctx.get("caller_tag") or "").strip()
+        if explicit:
+            return explicit
+
+        adapter_name = str(ctx.get("adapter") or "").strip().lower()
+        chat_type = str(ctx.get("chat_type") or "").strip().lower()
+        if adapter_name == "telegram" and chat_type in ("group", "supergroup"):
+            chat_id = str(ctx.get("chat_id") or "").strip()
+            if chat_id:
+                return chat_id
+
+        fallback = str(ctx.get("task_id") or self.name or "").strip()
+        return fallback or None
+
     async def handle(self, query: str, context=None) -> dict:
         """Execute LangChain chain and return unified result payload."""
         ctx = context or {}
@@ -213,7 +234,7 @@ class AgentBase(ABC):
                         source_context={k: v for k, v in ctx.items() if k not in {"memory_context"}},
                         final_response=str(content),
                         muid=muid,
-                        caller_tag=str(ctx.get("caller_tag") or ctx.get("task_id") or self.name).strip() or None,
+                        caller_tag=self._memoryd_caller_tag(ctx),
                         types=update_types,
                     )
                     memoryd_meta.update({

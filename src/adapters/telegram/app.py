@@ -478,18 +478,29 @@ class TelegramAdapter(Adapter):
 
     @staticmethod
     def _extract_reply_marker(text: str) -> tuple[str, int | None]:
-        """Extract __REPLY__:<message_id> marker from model text.
+        """Extract one or more __REPLY__:<message_id> markers from model text.
 
         Input: raw model output text.
         Output: cleaned text and optional reply target message id.
         """
 
         raw = str(text or "")
-        match = re.search(r"__REPLY__\s*:\s*(\d+)", raw)
-        if not match:
+        matches = list(re.finditer(r"__REPLY__\s*:\s*(\d+)", raw))
+        if not matches:
             return raw, None
-        reply_to = int(match.group(1))
-        cleaned = (raw[: match.start()] + raw[match.end() :]).strip()
+        reply_to = int(matches[-1].group(1))
+        cleaned_lines: list[str] = []
+        for line in raw.splitlines():
+            if not re.search(r"__REPLY__\s*:\s*\d+", line):
+                cleaned_lines.append(line)
+                continue
+            cleaned_line = re.sub(r"__REPLY__\s*:\s*\d+", "", line)
+            cleaned_line = re.sub(r"[ \t]+", " ", cleaned_line).strip()
+            if cleaned_line:
+                cleaned_lines.append(cleaned_line)
+        cleaned = "\n".join(cleaned_lines)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned, reply_to
 
     @staticmethod

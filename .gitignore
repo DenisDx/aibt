@@ -51,3 +51,4 @@ htmlcov/
 .tox/
 .test-results/
 local_*.*
+local_*/

@@ -69,6 +69,17 @@ class TelegramAdapterLateDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sent_messages, [(123, "Delayed hello", 104)])
 
+    def test_normalize_task_result_uses_last_reply_marker_and_strips_control_lines(self) -> None:
+        response_text, reply_to_message_id, skip_reason = TelegramAdapter._normalize_task_result(
+            {
+                "result": "---\n__REPLY__:100\n__REPLY__:104\nHello there"
+            }
+        )
+
+        self.assertEqual(response_text, "---\nHello there")
+        self.assertEqual(reply_to_message_id, 104)
+        self.assertIsNone(skip_reason)
+
     async def test_deliver_task_result_late_skips_model_requested_silence(self) -> None:
         adapter, sent_messages = self._build_adapter(
             [
