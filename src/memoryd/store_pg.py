@@ -407,6 +407,27 @@ class MemorydStore:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM memoryd_tasks WHERE task_id=%s", (task_id,))
 
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        """Return one memoryd task row by id.
+
+        Input: task id.
+        Output: task row or None.
+        """
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM memoryd_tasks
+                    WHERE task_id=%s
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
     def prune_records(self, muid: str, type_name: str, max_record_count: int, max_content_length: int, conn: Any | None = None) -> int:
         """Enforce per-MUID/type retention limits.
 

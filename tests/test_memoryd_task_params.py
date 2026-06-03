@@ -24,6 +24,7 @@ class _DummyStore:
         self.done_task_id = None
         self.failed_task_id = None
         self.failed_error = None
+        self.task_rows = {}
 
     @contextmanager
     def _tx_conn(self):
@@ -32,19 +33,35 @@ class _DummyStore:
     def mark_task_done(self, task_id: str, conn=None) -> None:
         _ = conn
         self.done_task_id = task_id
+        row = self.task_rows.setdefault(task_id, {"task_id": task_id})
+        row["status"] = "done"
+        row["phase"] = "done"
 
     def mark_task_failed(self, task_id: str, error: str) -> None:
         self.failed_task_id = task_id
         self.failed_error = error
+        row = self.task_rows.setdefault(task_id, {"task_id": task_id})
+        row["status"] = "failed"
+        row["phase"] = "failed"
 
     def mark_task_skipped(self, task_id: str, reason: str) -> None:
-        raise AssertionError(f"task should not be skipped: {task_id} {reason}")
+        row = self.task_rows.setdefault(task_id, {"task_id": task_id})
+        row["status"] = "skipped"
+        row["phase"] = "skipped"
+        row["error"] = reason
 
     def update_task_phase(self, task_id: str, phase: str, conn=None) -> None:
-        _ = (task_id, phase, conn)
+        _ = conn
+        row = self.task_rows.setdefault(task_id, {"task_id": task_id})
+        row["phase"] = phase
 
     def update_task_error(self, task_id: str, error: str) -> None:
-        _ = (task_id, error)
+        row = self.task_rows.setdefault(task_id, {"task_id": task_id})
+        row["error"] = error
+
+    def get_task(self, task_id: str) -> dict | None:
+        row = self.task_rows.get(task_id)
+        return dict(row) if isinstance(row, dict) else None
 
 
 class _QueueingStore:
@@ -52,17 +69,23 @@ class _QueueingStore:
 
     def __init__(self) -> None:
         self.created_task = None
+        self.deleted_task_ids = []
+        self.pending_rows = []
+        self.return_inflight_on_caller_tag = False
+        self.inflight_calls = []
 
     def find_inflight_tasks(self, muid, caller_tag=None, work_hash=None):
-        _ = (muid, caller_tag, work_hash)
+        self.inflight_calls.append((muid, caller_tag, work_hash))
+        if self.return_inflight_on_caller_tag and caller_tag:
+            return [{"task_id": "existing-running"}]
         return []
 
     def find_pending_tasks_by_key(self, muid, caller_tag=None):
         _ = (muid, caller_tag)
-        return []
+        return list(self.pending_rows)
 
     def delete_task(self, task_id):
-        _ = task_id
+        self.deleted_task_ids.append(task_id)
 
     def create_task(self, task):
         self.created_task = dict(task)
@@ -102,6 +125,25 @@ class _ListActiveStore:
             "limit": limit,
             "offset": offset,
         }
+
+
+class _RestartStore:
+    """Minimal store stub for invoke_llm restart tests."""
+
+    def __init__(self) -> None:
+        self.created_tasks = []
+        self.failed = []
+        self.pending_rows = []
+
+    def find_pending_tasks_by_key(self, muid, caller_tag=None):
+        _ = (muid, caller_tag)
+        return list(self.pending_rows)
+
+    def create_task(self, task):
+        self.created_tasks.append(dict(task))
+
+    def mark_task_failed(self, task_id: str, error: str) -> None:
+        self.failed.append((task_id, error))
 
 
 class MemorydTaskParamsTest(unittest.TestCase):
@@ -156,6 +198,7 @@ class MemorydTaskParamsTest(unittest.TestCase):
             "min_p": 0.05,
             "tools": ["search"],
         }
+        svc.store.task_rows["task-1"] = {"task_id": "task-1", "status": "running", "phase": "invoke_llm"}
 
         with patch("memoryd.api.build_llm", side_effect=_fake_build_llm):
             result = svc._process_task(task)
@@ -257,6 +300,137 @@ class MemorydTaskParamsTest(unittest.TestCase):
         self.assertTrue(result.get("queued"))
         self.assertEqual(scheduled.get("task_id"), result.get("task_id"))
         self.assertEqual(svc.store.created_task.get("phase"), "queued")
+
+    def test_enqueue_update_does_not_skip_running_task_only_because_caller_tag_matches(self) -> None:
+        svc = MemorydService.__new__(MemorydService)
+        svc.initialize = lambda: None
+        svc._normalize_muid = lambda muid: str(muid or "default")
+        svc._normalize_types = lambda values: [str(v) for v in (values or [])]
+        svc._memoryd_model_cfg = lambda: {"memory_task_prio": 8}
+        svc.store = _QueueingStore()
+        svc.store.return_inflight_on_caller_tag = True
+        svc._dispatch_after_enqueue_async = lambda task_id: None
+
+        result = svc.enqueue_update(
+            source_context={"adapter": "test"},
+            final_response="ok",
+            muid="m1",
+            caller_tag="same-tag",
+            work_hash="work-2",
+            request_text="Write memories",
+            types=["semantic"],
+        )
+
+        self.assertTrue(result.get("queued"))
+        self.assertEqual(svc.store.inflight_calls[0], ("m1", None, "work-2"))
+        self.assertEqual(svc.store.created_task.get("caller_tag"), "same-tag")
+
+    def test_enqueue_update_replaces_pending_same_key(self) -> None:
+        svc = MemorydService.__new__(MemorydService)
+        svc.initialize = lambda: None
+        svc._normalize_muid = lambda muid: str(muid or "default")
+        svc._normalize_types = lambda values: [str(v) for v in (values or [])]
+        svc._memoryd_model_cfg = lambda: {"memory_task_prio": 8, "queue": {"cancel_policy": "cancel_previous_same_muid"}}
+        svc.store = _QueueingStore()
+        svc.store.pending_rows = [{"task_id": "pending-1"}]
+        svc._dispatch_after_enqueue_async = lambda task_id: None
+
+        result = svc.enqueue_update(
+            source_context={"adapter": "test"},
+            final_response="ok",
+            muid="m1",
+            caller_tag="same-tag",
+            request_text="Write memories",
+            types=["semantic"],
+        )
+
+        self.assertTrue(result.get("queued"))
+        self.assertEqual(svc.store.deleted_task_ids, ["pending-1"])
+
+    def test_process_task_ignores_late_llm_response_after_restart(self) -> None:
+        svc = MemorydService.__new__(MemorydService)
+        svc.root_dir = ROOT
+        svc.config = {}
+        svc.memoryd_cfg = {}
+        svc.store = _DummyStore()
+        svc._active_provider = lambda: "default"
+        svc._resolve_model_for_provider = lambda provider, model=None: str(model or "gpt-test")
+        svc._record_snapshot = lambda muid, types, limit: []
+        svc._enabled_types = lambda: ["semantic"]
+        svc._llm_logging_enabled = lambda: False
+        svc._prune_after_task = lambda muid, types, conn=None: self.fail("late response must not prune")
+        svc._apply_mutation = lambda task, mutation, conn=None: self.fail("late response must not apply mutations")
+
+        task = {
+            "task_id": "task-late",
+            "muid": "muid-1",
+            "requested_types": ["semantic"],
+            "context_types": ["semantic"],
+            "source_context": {},
+            "final_response": "done",
+            "request_text": "Write semantic memories.",
+            "provider": "openaix",
+            "model": "gpt-test",
+        }
+        svc.store.task_rows["task-late"] = {"task_id": "task-late", "status": "running", "phase": "invoke_llm"}
+
+        def _fake_build_llm(config, **kwargs):
+            _ = (config, kwargs)
+
+            class _FakeLLM:
+                def invoke(self, messages):
+                    _ = messages
+                    svc.store.task_rows["task-late"] = {"task_id": "task-late", "status": "failed", "phase": "failed"}
+                    return SimpleNamespace(content="[]")
+
+            return _FakeLLM()
+
+        with patch("memoryd.api.build_llm", side_effect=_fake_build_llm):
+            result = svc._process_task(task)
+
+        self.assertEqual(result.get("status"), "skipped")
+        self.assertIsNone(svc.store.done_task_id)
+
+    def test_restart_overdue_invoke_llm_task_creates_replacement_and_releases_lock(self) -> None:
+        svc = MemorydService.__new__(MemorydService)
+        svc.memoryd_cfg = {"memory_task_prio": 8}
+        svc.store = _RestartStore()
+        svc._invoke_llm_restart_seconds = lambda: 1200
+        svc._normalize_muid = lambda muid: str(muid or "default")
+        svc._normalize_types = lambda values: [str(v) for v in (values or [])]
+        released = []
+        svc._release_muid_lock = lambda muid: released.append(muid)
+        svc.list_active_tasks = lambda limit=500, offset=0: {
+            "items": [
+                {
+                    "task_id": "task-running",
+                    "status": "running",
+                    "phase": "invoke_llm",
+                    "running_seconds": 1255,
+                    "muid": "m1",
+                    "caller_tag": "tag-1",
+                    "work_hash": "hash-1",
+                    "request_text": "Write memories",
+                    "provider": "default",
+                    "model": "m",
+                    "requested_types": ["semantic"],
+                    "context_types": ["semantic"],
+                    "source_context": {"adapter": "telegram"},
+                    "final_response": "ok",
+                    "prio": 8,
+                }
+            ],
+            "total": 1,
+        }
+
+        with patch("memoryd.api.uuid4", side_effect=["replacement-task-id"]):
+            result = svc.restart_overdue_invoke_tasks()
+
+        self.assertEqual(result.get("restarted"), 1)
+        self.assertEqual(released, ["m1"])
+        self.assertEqual(svc.store.created_tasks[0].get("task_id"), "replacement-task-id")
+        self.assertEqual(svc.store.created_tasks[0].get("caller_tag"), "tag-1")
+        self.assertEqual(svc.store.failed[0][0], "task-running")
 
     def test_list_active_tasks_adds_phase_reason_and_watchdog(self) -> None:
         svc = MemorydService.__new__(MemorydService)

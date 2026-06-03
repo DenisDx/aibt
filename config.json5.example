@@ -205,6 +205,7 @@
     // agents.items.<agent>.memoryd.context_types and .update_types
     "max_sim_task": 1,
     "memory_task_prio": 8,
+    "invoke_llm_restart_seconds": 1200,  // Restart a task if it stays stuck in invoke_llm longer than this.
     "muid": "default",
     "queue": {
       "cancel_policy": "cancel_previous_same_muid",

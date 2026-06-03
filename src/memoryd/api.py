@@ -316,6 +316,63 @@ class MemorydService:
         except Exception:
             return 120
 
+    def _invoke_llm_restart_seconds(self) -> int:
+        """Return restart threshold for stuck invoke_llm tasks in seconds."""
+
+        cfg = self._memoryd_model_cfg()
+        value = cfg.get("invoke_llm_restart_seconds", 1200) if isinstance(cfg, dict) else 1200
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 1200
+
+    def _task_row(self, task_id: str) -> dict[str, Any] | None:
+        """Return current task row for state checks."""
+
+        row = self.store.get_task(task_id)
+        return row if isinstance(row, dict) else None
+
+    def _task_is_running(self, task_id: str) -> bool:
+        """Return whether task is still in running state."""
+
+        row = self._task_row(task_id)
+        return str((row or {}).get("status") or "").strip().lower() == "running"
+
+    def _clone_task_for_restart(self, task: dict[str, Any]) -> str:
+        """Create a fresh pending copy of one running task for restart."""
+
+        new_task_id = str(uuid4())
+        self.store.create_task(
+            {
+                "task_id": new_task_id,
+                "muid": self._normalize_muid(task.get("muid")),
+                "caller_tag": str(task.get("caller_tag") or "").strip() or None,
+                "work_hash": str(task.get("work_hash") or "").strip() or None,
+                "request_text": str(task.get("request_text") or "").strip() or None,
+                "phase": "queued",
+                "provider": str(task.get("provider") or "").strip() or None,
+                "model": str(task.get("model") or "").strip() or None,
+                "temperature": task.get("temperature"),
+                "top_p": task.get("top_p"),
+                "repetition_penalty": task.get("repetition_penalty"),
+                "repeat_last_n": task.get("repeat_last_n"),
+                "max_tokens": task.get("max_tokens"),
+                "num_predict": task.get("num_predict"),
+                "seed": task.get("seed"),
+                "presence_penalty": task.get("presence_penalty"),
+                "frequency_penalty": task.get("frequency_penalty"),
+                "top_k": task.get("top_k"),
+                "min_p": task.get("min_p"),
+                "tools": normalize_json_value(task.get("tools")) if task.get("tools") is not None else None,
+                "context_types": self._normalize_types(task.get("context_types")),
+                "requested_types": self._normalize_types(task.get("requested_types")),
+                "source_context": normalize_json_value(task.get("source_context") or {}),
+                "final_response": str(task.get("final_response") or ""),
+                "prio": int(task.get("prio", self._memoryd_model_cfg().get("memory_task_prio", 0))),
+            }
+        )
+        return new_task_id
+
     def _task_reason_for_display(self, task: dict[str, Any]) -> str:
         """Build a short human-readable reason for active-task state."""
 
@@ -381,6 +438,64 @@ class MemorydService:
             if task_id not in active_running:
                 self._watchdog_warned.pop(task_id, None)
         return {"warned": warned, "running": len(active_running)}
+
+    def restart_overdue_invoke_tasks(self) -> dict[str, Any]:
+        """Restart invoke_llm tasks that exceed the configured timeout."""
+
+        threshold = self._invoke_llm_restart_seconds()
+        if threshold <= 0:
+            return {"checked": 0, "restarted": 0, "reused_pending": 0}
+        page = self.list_active_tasks(limit=500, offset=0)
+        checked = 0
+        restarted = 0
+        reused_pending = 0
+        for item in page.get("items", []):
+            status = str(item.get("status") or "").strip().lower()
+            phase = str(item.get("phase") or "").strip().lower()
+            if status != "running" or phase != "invoke_llm":
+                continue
+            checked += 1
+            running_seconds = int(item.get("running_seconds", 0) or 0)
+            if running_seconds < threshold:
+                continue
+            task_id = str(item.get("task_id") or "")
+            muid = self._normalize_muid(item.get("muid"))
+            caller_tag = str(item.get("caller_tag") or "").strip() or None
+            try:
+                pending = self.store.find_pending_tasks_by_key(muid, caller_tag=caller_tag)
+                replacement_task_id = ""
+                if pending:
+                    replacement_task_id = str(pending[-1].get("task_id") or "")
+                    reused_pending += 1
+                else:
+                    replacement_task_id = self._clone_task_for_restart(item)
+                reason = (
+                    f"invoke_llm exceeded restart timeout {threshold}s after {running_seconds}s; "
+                    f"replacement_task_id={replacement_task_id or '<none>'}"
+                )
+                self.store.mark_task_failed(task_id, reason)
+                self._release_muid_lock(muid)
+                log(
+                    "memoryd",
+                    "warning",
+                    (
+                        "memoryd task restart after invoke_llm timeout "
+                        f"task_id={task_id} muid={muid} caller_tag={caller_tag or '<none>'} "
+                        f"running_seconds={running_seconds} threshold={threshold} "
+                        f"replacement_task_id={replacement_task_id or '<none>'} reused_pending={bool(pending)}"
+                    ),
+                )
+                restarted += 1
+            except Exception as e:
+                log(
+                    "memoryd",
+                    "warning",
+                    (
+                        "memoryd invoke_llm timeout restart failed "
+                        f"task_id={task_id} muid={muid} caller_tag={caller_tag or '<none>'} error={e}"
+                    ),
+                )
+        return {"checked": checked, "restarted": restarted, "reused_pending": reused_pending}
 
     def _memoryd_model_cfg(self) -> dict[str, Any]:
         return self.memoryd_cfg if isinstance(self.memoryd_cfg, dict) else {}
@@ -686,7 +801,7 @@ class MemorydService:
         norm_top_k = None if top_k is None or str(top_k).strip() == "" else int(top_k)
         norm_min_p = None if min_p is None or str(min_p).strip() == "" else float(min_p)
         if norm_work_hash is not None:
-            inflight = self.store.find_inflight_tasks(muid, caller_tag=norm_caller_tag, work_hash=norm_work_hash)
+            inflight = self.store.find_inflight_tasks(muid, work_hash=norm_work_hash)
             if inflight:
                 existing_task_id = str(inflight[0].get("task_id") or "")
                 log(
@@ -1163,6 +1278,17 @@ class MemorydService:
             finally:
                 if log_token is not None:
                     pop_llm_log_context(log_token)
+            if not self._task_is_running(task_id):
+                current = self._task_row(task_id) or {}
+                log(
+                    "memoryd",
+                    "warning",
+                    (
+                        "memoryd late LLM response ignored "
+                        f"task_id={task_id} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')}"
+                    ),
+                )
+                return {"status": "skipped", "pruned": 0, "reason": "late_response_ignored"}
             self.store.update_task_phase(task_id, "parse_mutations")
             log(
                 "memoryd",
@@ -1187,6 +1313,17 @@ class MemorydService:
             return {"status": "done", "pruned": pruned, "mutations": len(mutations)}
         except Exception as e:
             err = str(e)
+            if not self._task_is_running(task_id):
+                current = self._task_row(task_id) or {}
+                log(
+                    "memoryd",
+                    "warning",
+                    (
+                        "memoryd late task exception ignored "
+                        f"task_id={task_id} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')} error={err}"
+                    ),
+                )
+                return {"status": "skipped", "error": err, "pruned": 0}
             self.store.update_task_phase(task_id, "failed")
             self.store.mark_task_failed(task["task_id"], err)
             log("memoryd", "error", f"memoryd task failed task_id={task_id} muid={muid}: {err}")

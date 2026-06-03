@@ -21,6 +21,7 @@ def run_memoryd_cron(root_dir: str, config: dict[str, Any]) -> dict[str, Any]:
     log("memoryd", "debug", "call memoryd.cron.run_memoryd_cron")
     memoryd_cfg = config.get("memoryd", {}) if isinstance(config, dict) else {}
     svc = get_memoryd_service(root_dir, config)
+    restart = svc.restart_overdue_invoke_tasks()
     watchdog = svc.monitor_running_tasks()
     if not memoryd_cfg.get("enabled", False):
         # Do not skip pending tasks: they may come from envid-overlaid flows.
@@ -28,10 +29,10 @@ def run_memoryd_cron(root_dir: str, config: dict[str, Any]) -> dict[str, Any]:
             pending = int(svc.store.count_pending_tasks())
         except Exception as e:
             log("memoryd", "warning", f"memoryd cron pending check failed while memoryd.enabled=false: {e}")
-            return {"enabled": False, "queue": {"picked": 0, "started": 0, "done": 0, "failed": 0, "pruned": 0, "skipped": 0}, "watchdog": watchdog}
+            return {"enabled": False, "queue": {"picked": 0, "started": 0, "done": 0, "failed": 0, "pruned": 0, "skipped": 0}, "restart": restart, "watchdog": watchdog}
         if pending <= 0:
             log("memoryd", "info", "memoryd cron no-op: memoryd.enabled=false and pending queue is empty")
-            return {"enabled": False, "queue": {"picked": 0, "started": 0, "done": 0, "failed": 0, "pruned": 0, "skipped": 0}, "watchdog": watchdog}
+            return {"enabled": False, "queue": {"picked": 0, "started": 0, "done": 0, "failed": 0, "pruned": 0, "skipped": 0}, "restart": restart, "watchdog": watchdog}
         log("memoryd", "info", f"memoryd cron processing pending queue while memoryd.enabled=false; pending={pending}")
 
     result = svc.run_tick(limit=int(memoryd_cfg.get("max_sim_task", 1)))
@@ -46,4 +47,4 @@ def run_memoryd_cron(root_dir: str, config: dict[str, Any]) -> dict[str, Any]:
                 f"pruned={result.get('pruned', 0)} skipped={result.get('skipped', 0)}"
             ),
         )
-    return {"enabled": True, "queue": result, "watchdog": watchdog}
+    return {"enabled": True, "queue": result, "restart": restart, "watchdog": watchdog}

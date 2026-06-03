@@ -421,25 +421,30 @@ class WebUIServer:
         return agent.run_task_now(task_id)
 
     def _inflight_task_stats(self) -> dict[str, int]:
-        """Count started-but-not-finished orchestrator tasks.
+        """Count not-finished orchestrator tasks.
 
+        pending: accepted but not yet running.
         running: currently executing agent/fallback node.
         retrying: failed attempt with active retry flow.
-        total: running + retrying.
+        total: pending + running + retrying.
         """
 
+        pending = 0
         running = 0
         retrying = 0
         for task in self.orchestrator.tasks.values():
             status = str(task.get("status", "")).strip().lower()
-            if status == "running":
+            if status == "pending":
+                pending += 1
+            elif status == "running":
                 running += 1
             elif status == "retrying":
                 retrying += 1
         return {
+            "pending": pending,
             "running": running,
             "retrying": retrying,
-            "total": running + retrying,
+            "total": pending + running + retrying,
         }
 
     def _read_log(self, log_type: str, lines: int = 200) -> dict:

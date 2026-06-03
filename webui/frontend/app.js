@@ -412,9 +412,10 @@ async function loadDashboard() {
     if (cardProcessing) {
       const proc = s.processing || {};
       const total = Number(proc.total || 0);
+      const pending = Number(proc.pending || 0);
       const running = Number(proc.running || 0);
       const retrying = Number(proc.retrying || 0);
-      cardProcessing.textContent = `${total} (run:${running} retry:${retrying})`;
+      cardProcessing.textContent = `${total} (pending:${pending} run:${running} retry:${retrying})`;
       cardProcessing.className = 'card-value ' + (total > 0 ? 'warn' : 'ok');
     }
   } catch (_) {
