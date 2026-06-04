@@ -19,6 +19,7 @@ from core.config import load_env_file
 from core.envid_runtime import build_effective_config
 from core.logging_utils import log
 from memoryd import get_memoryd_service
+from memoryd.schemas import normalize_memoryd_type_specs, split_memoryd_type_spec
 
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
@@ -62,14 +63,7 @@ class MemoryExecutorStore:
     def _normalize_types(values: Any) -> list[str]:
         """Normalize list-like task type fields."""
 
-        if not isinstance(values, list):
-            return []
-        out: list[str] = []
-        for item in values:
-            text = str(item or "").strip().lower()
-            if text and text not in out:
-                out.append(text)
-        return out
+        return normalize_memoryd_type_specs(values if isinstance(values, list) else [])
 
     @staticmethod
     def _normalize_tools(values: Any) -> list[str] | None:
@@ -519,7 +513,7 @@ class MemoryExecutorAgent(AgentBase):
             effective_cfg = build_effective_config(self.app_config, task_envid)
             memoryd_service = memoryd_services.get(task_envid)
             if memoryd_service is None:
-                memoryd_service = get_memoryd_service(root_dir, effective_cfg)
+                memoryd_service = get_memoryd_service(root_dir, effective_cfg, current_envid=task_envid)
                 memoryd_service.initialize()
                 memoryd_services[task_envid] = memoryd_service
             if not self._is_due(task, now_utc):
@@ -577,7 +571,7 @@ class MemoryExecutorAgent(AgentBase):
         root_dir = str(self.app_config.get("root") or os.getcwd())
         task_envid = str(task.get("envid") or "").strip() or None
         effective_cfg = build_effective_config(self.app_config, task_envid)
-        memoryd_service = get_memoryd_service(root_dir, effective_cfg)
+        memoryd_service = get_memoryd_service(root_dir, effective_cfg, current_envid=task_envid)
         memoryd_service.initialize()
         now_utc = datetime.now(timezone.utc)
 
@@ -669,7 +663,7 @@ class MemoryExecutorAgent(AgentBase):
             return _TaskOutcome(reset_timer=True, queued_count=1 if queued else 0, skipped_count=0 if queued else 1, temp_deferred=False)
 
         muid = str(task.get("muid") or "").strip().lower()
-        rows = memoryd_service.store.list_records(muid=muid, types=["todo"], limit=500, offset=0)
+        rows = (memoryd_service.list_records(muid=muid, types=["todo"], offset=0, limit=500).get("items") or [])
         matches = [row for row in rows if str(row.get("title") or "").strip() == todo_title]
         if not matches:
             return _TaskOutcome(reset_timer=True, queued_count=0, skipped_count=1, temp_deferred=False)
@@ -925,13 +919,13 @@ class MemoryExecutorAgent(AgentBase):
 
         raw_values = task.get(key)
         if isinstance(raw_values, list) and raw_values:
-            requested = [str(item or "").strip().lower() for item in raw_values if str(item or "").strip()]
+            requested = normalize_memoryd_type_specs(raw_values)
         else:
             defaults = memoryd_cfg.get(key) if isinstance(memoryd_cfg, dict) else None
             if isinstance(defaults, list) and defaults:
-                requested = [str(item or "").strip().lower() for item in defaults if str(item or "").strip()]
+                requested = normalize_memoryd_type_specs(defaults)
             else:
-                requested = list(allowed)
+                requested = normalize_memoryd_type_specs(list(allowed))
 
         allowed_set = {str(item).strip().lower() for item in allowed if str(item).strip()}
         if not allowed_set:
@@ -943,9 +937,10 @@ class MemoryExecutorAgent(AgentBase):
         resolved: list[str] = []
         dropped: list[str] = []
         for item in requested:
-            if item in allowed_set and item not in resolved:
+            _, type_name = split_memoryd_type_spec(item)
+            if type_name in allowed_set and item not in resolved:
                 resolved.append(item)
-            elif item not in allowed_set and item not in dropped:
+            elif item not in dropped:
                 dropped.append(item)
         if dropped:
             log(
@@ -981,11 +976,4 @@ class MemoryExecutorAgent(AgentBase):
     def _normalize_types(self, values: Any) -> list[str]:
         """Normalize task type list into compact lowercase strings."""
 
-        if not isinstance(values, list):
-            return []
-        out: list[str] = []
-        for item in values:
-            text = str(item or "").strip().lower()
-            if text and text not in out:
-                out.append(text)
-        return out
+        return normalize_memoryd_type_specs(values if isinstance(values, list) else [])

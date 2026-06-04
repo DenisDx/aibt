@@ -71,6 +71,22 @@ class AgentBaseMemorydCallerTagTest(unittest.TestCase):
 
         self.assertEqual(caller_tag, "unique-task-id")
 
+    def test_policy_types_keep_muid_prefixed_specs_when_base_type_is_allowed(self) -> None:
+        agent = self._agent()
+        agent.agent_config = {
+            "memoryd": {
+                "context_types": ["shared:semantic", "semantic", "shared:missing"],
+            }
+        }
+
+        resolved = agent._resolve_memoryd_policy_types(
+            "context_types",
+            default_types=["semantic"],
+            allowed_types=["semantic"],
+        )
+
+        self.assertEqual(resolved, ["shared:semantic", "semantic"])
+
 
 if __name__ == "__main__":
     unittest.main()

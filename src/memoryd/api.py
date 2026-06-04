@@ -30,10 +30,14 @@ from memoryd.schemas import (
     DEFAULT_MEMORYD_TASK_LIMIT,
     MemorydTaskMutation,
     deserialize_json,
+    memoryd_type_names,
     normalize_json_value,
+    normalize_memoryd_type_specs,
     normalize_muid,
     normalize_types,
+    resolve_memoryd_type_specs,
     serialize_json,
+    split_memoryd_type_spec,
 )
 from memoryd.store_pg import MemorydStore
 from core.envid_runtime import build_effective_config
@@ -58,12 +62,13 @@ def _preview_data_block(value: Any, head: int = 100, tail: int = 100) -> str:
     return text[: max(0, int(head))] + text[-max(0, int(tail)) :]
 
 
-def _muid_lock_key(muid: str) -> int:
-    """Return signed 64-bit advisory lock key derived from MUID."""
+def _muid_lock_key(envid: str | None, muid: str) -> int:
+    """Return signed 64-bit advisory lock key derived from `(envid, muid)` scope."""
 
     import hashlib
 
-    digest = hashlib.sha1(str(muid or "").encode("utf-8")).digest()[:8]
+    scope = f"{str(envid or '').strip()}::{str(muid or '').strip()}"
+    digest = hashlib.sha1(scope.encode("utf-8")).digest()[:8]
     return int.from_bytes(digest, "big", signed=True)
 
 
@@ -178,9 +183,10 @@ class MemorydService:
     Output: unified API for record and task operations.
     """
 
-    def __init__(self, root_dir: str, config: dict[str, Any]):
+    def __init__(self, root_dir: str, config: dict[str, Any], current_envid: str | None = None):
         self.root_dir = root_dir
         self.config = config or {}
+        self.current_envid = str(current_envid or "").strip() or None
         self.memoryd_cfg = self.config.get("memoryd", {}) if isinstance(self.config, dict) else {}
         self.enabled = bool(self.memoryd_cfg.get("enabled", False))
         self.store = MemorydStore(root_dir, config)
@@ -235,7 +241,7 @@ class MemorydService:
             )
         return items
 
-    def list_muids(self, limit: int = 200) -> list[str]:
+    def list_muids(self, limit: int = 200, *, envid: str | None = None, all_envids: bool = False) -> list[str]:
         """Return known MUID values.
 
         Input: max number of values.
@@ -243,7 +249,13 @@ class MemorydService:
         """
 
         self.initialize()
-        return self.store.list_muids(limit=max(1, int(limit)))
+        service_envid = self._normalize_envid(envid) if envid is not None else self._service_envid()
+        return self.store.list_muids(
+            limit=max(1, int(limit)),
+            envid=service_envid,
+            include_global=service_envid is not None,
+            all_envids=bool(all_envids),
+        )
 
     def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0) -> dict[str, Any]:
         """Return pending and running memoryd tasks.
@@ -253,7 +265,8 @@ class MemorydService:
         """
 
         self.initialize()
-        page = self.store.list_active_tasks(envid=envid, limit=max(1, int(limit)), offset=max(0, int(offset)))
+        scope_envid = self._normalize_envid(envid) if envid is not None else self._service_envid()
+        page = self._store_list_active_tasks(scope_envid, max(1, int(limit)), max(0, int(offset)))
         items: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         watchdog_seconds = self._running_watchdog_seconds()
@@ -264,7 +277,7 @@ class MemorydService:
             item["tools"] = deserialize_json(item.get("tools"), None)
             item["source_context"] = deserialize_json(item.get("source_context"), {}) or {}
             source_context = item.get("source_context") if isinstance(item.get("source_context"), dict) else {}
-            item["envid"] = str(source_context.get("envid") or "").strip() or None
+            item["envid"] = self._normalize_envid(item.get("envid")) or self._normalize_envid(source_context.get("envid"))
             status = str(item.get("status") or "").strip().lower()
             phase = str(item.get("phase") or "").strip().lower() or ("running" if status == "running" else "queued")
             item["phase"] = phase
@@ -345,6 +358,7 @@ class MemorydService:
         self.store.create_task(
             {
                 "task_id": new_task_id,
+                "envid": self._task_envid(task),
                 "muid": self._normalize_muid(task.get("muid")),
                 "caller_tag": str(task.get("caller_tag") or "").strip() or None,
                 "work_hash": str(task.get("work_hash") or "").strip() or None,
@@ -364,14 +378,75 @@ class MemorydService:
                 "top_k": task.get("top_k"),
                 "min_p": task.get("min_p"),
                 "tools": normalize_json_value(task.get("tools")) if task.get("tools") is not None else None,
-                "context_types": self._normalize_types(task.get("context_types")),
-                "requested_types": self._normalize_types(task.get("requested_types")),
+                "context_types": self._normalize_type_specs(task.get("context_types")),
+                "requested_types": self._normalize_type_specs(task.get("requested_types")),
                 "source_context": normalize_json_value(task.get("source_context") or {}),
                 "final_response": str(task.get("final_response") or ""),
                 "prio": int(task.get("prio", self._memoryd_model_cfg().get("memory_task_prio", 0))),
             }
         )
         return new_task_id
+
+    def _is_signature_compat_error(self, error: TypeError) -> bool:
+        text = str(error or "")
+        return "unexpected keyword" in text or "positional argument" in text or "required positional argument" in text
+
+    def _store_find_pending_tasks_by_key(self, muid: str, caller_tag: str | None = None, envid: str | None = None) -> list[dict[str, Any]]:
+        try:
+            return self.store.find_pending_tasks_by_key(muid, caller_tag=caller_tag, envid=envid)
+        except TypeError as error:
+            if not self._is_signature_compat_error(error):
+                raise
+            return self.store.find_pending_tasks_by_key(muid, caller_tag=caller_tag)
+
+    def _store_find_inflight_tasks(self, muid: str, caller_tag: str | None = None, work_hash: str | None = None, envid: str | None = None) -> list[dict[str, Any]]:
+        try:
+            return self.store.find_inflight_tasks(muid, caller_tag=caller_tag, work_hash=work_hash, envid=envid)
+        except TypeError as error:
+            if not self._is_signature_compat_error(error):
+                raise
+            return self.store.find_inflight_tasks(muid, caller_tag=caller_tag, work_hash=work_hash)
+
+    def _store_list_active_tasks(self, envid: str | None, limit: int, offset: int) -> dict[str, Any]:
+        try:
+            return self.store.list_active_tasks(
+                envid=envid,
+                include_global=envid is not None,
+                all_envids=envid is None,
+                limit=limit,
+                offset=offset,
+            )
+        except TypeError as error:
+            if not self._is_signature_compat_error(error):
+                raise
+            return self.store.list_active_tasks(envid=envid, limit=limit, offset=offset)
+
+    def _record_snapshot_for_task(self, muid: str, types: list[str], limit: int, envid: str | None) -> list[dict[str, Any]]:
+        try:
+            return self._record_snapshot(muid, types, limit, envid=envid)
+        except TypeError as error:
+            if not self._is_signature_compat_error(error):
+                raise
+            return self._record_snapshot(muid, types, limit)
+
+    def _prune_task_targets(self, targets: set[tuple[str | None, str, str]], conn: Any | None = None) -> int:
+        pruned = 0
+        for envid, muid, type_name in sorted(targets):
+            try:
+                pruned += self._prune_after_task(muid, [type_name], envid=envid, conn=conn)
+            except TypeError as error:
+                if not self._is_signature_compat_error(error):
+                    raise
+                pruned += self._prune_after_task(muid, [type_name], conn=conn)
+        return pruned
+
+    def _release_task_lock(self, envid: str | None, muid: str) -> None:
+        try:
+            self._release_muid_lock(envid, muid)
+        except TypeError as error:
+            if not self._is_signature_compat_error(error):
+                raise
+            self._release_muid_lock(muid)
 
     def _task_reason_for_display(self, task: dict[str, Any]) -> str:
         """Build a short human-readable reason for active-task state."""
@@ -459,10 +534,11 @@ class MemorydService:
             if running_seconds < threshold:
                 continue
             task_id = str(item.get("task_id") or "")
+            task_envid = self._task_envid(item)
             muid = self._normalize_muid(item.get("muid"))
             caller_tag = str(item.get("caller_tag") or "").strip() or None
             try:
-                pending = self.store.find_pending_tasks_by_key(muid, caller_tag=caller_tag)
+                pending = self._store_find_pending_tasks_by_key(muid, caller_tag=caller_tag, envid=task_envid)
                 replacement_task_id = ""
                 if pending:
                     replacement_task_id = str(pending[-1].get("task_id") or "")
@@ -474,13 +550,13 @@ class MemorydService:
                     f"replacement_task_id={replacement_task_id or '<none>'}"
                 )
                 self.store.mark_task_failed(task_id, reason)
-                self._release_muid_lock(muid)
+                self._release_task_lock(task_envid, muid)
                 log(
                     "memoryd",
                     "warning",
                     (
                         "memoryd task restart after invoke_llm timeout "
-                        f"task_id={task_id} muid={muid} caller_tag={caller_tag or '<none>'} "
+                        f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} caller_tag={caller_tag or '<none>'} "
                         f"running_seconds={running_seconds} threshold={threshold} "
                         f"replacement_task_id={replacement_task_id or '<none>'} reused_pending={bool(pending)}"
                     ),
@@ -492,7 +568,7 @@ class MemorydService:
                     "warning",
                     (
                         "memoryd invoke_llm timeout restart failed "
-                        f"task_id={task_id} muid={muid} caller_tag={caller_tag or '<none>'} error={e}"
+                        f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} caller_tag={caller_tag or '<none>'} error={e}"
                     ),
                 )
         return {"checked": checked, "restarted": restarted, "reused_pending": reused_pending}
@@ -567,6 +643,19 @@ class MemorydService:
     def _normalize_types(self, types: list[Any] | None) -> list[str]:
         return normalize_types(types, self._enabled_types())
 
+    def _normalize_type_specs(self, types: list[Any] | None) -> list[str]:
+        return normalize_memoryd_type_specs(types, self._enabled_types())
+
+    def _resolve_type_refs(self, types: list[Any] | None, default_muid: str) -> list[dict[str, str]]:
+        return resolve_memoryd_type_specs(types, default_muid=default_muid, allowed_types=self._enabled_types())
+
+    def _normalize_envid(self, envid: Any) -> str | None:
+        text = str(envid or "").strip()
+        return text or None
+
+    def _service_envid(self) -> str | None:
+        return getattr(self, "current_envid", None)
+
     def _normalize_muid(self, muid: str | None) -> str:
         clean = normalize_muid(muid)
         if not clean:
@@ -574,6 +663,20 @@ class MemorydService:
         if not clean:
             clean = "default"
         return clean
+
+    def _task_envid(self, task: dict[str, Any]) -> str | None:
+        clean = self._normalize_envid(task.get("envid"))
+        if clean is not None:
+            return clean
+        source_context = deserialize_json(task.get("source_context"), {})
+        if isinstance(source_context, dict):
+            clean = self._normalize_envid(source_context.get("envid"))
+            if clean is not None:
+                return clean
+            resolved = self._resolve_task_envid(source_context)
+            if resolved is not None:
+                return resolved
+        return self._service_envid()
 
     def _request_groups(self) -> list[dict[str, Any]]:
         groups = self._memoryd_model_cfg().get("requests", [])
@@ -588,7 +691,7 @@ class MemorydService:
         return groups if isinstance(groups, list) else []
 
     def _resolve_request_file(self, types: list[str]) -> str | None:
-        normalized = normalize_types(types)
+        normalized = normalize_types(memoryd_type_names(types))
         for item in self._request_groups():
             if not isinstance(item, dict):
                 continue
@@ -602,7 +705,7 @@ class MemorydService:
     def _resolve_request_file_from_memoryd_cfg(self, types: list[str], memoryd_cfg: dict[str, Any] | None) -> str | None:
         """Resolve request_file using one explicit memoryd config payload."""
 
-        normalized = normalize_types(types)
+        normalized = normalize_types(memoryd_type_names(types))
         for item in self._request_groups_from_cfg(memoryd_cfg):
             if not isinstance(item, dict):
                 continue
@@ -656,16 +759,20 @@ class MemorydService:
             return ""
         return path.read_text(encoding="utf-8", errors="replace")
 
-    def _record_snapshot(self, muid: str, types: list[str], limit_per_type: int) -> list[dict[str, Any]]:
-        rows = self.store.list_records(muid=muid, types=types or None, limit=max(1, int(limit_per_type)) * max(1, len(types) or 1))
-        grouped: dict[str, list[dict[str, Any]]] = {type_name: [] for type_name in types}
-        for row in rows:
-            type_name = str(row.get("type") or "").strip().lower()
-            if type_name in grouped and len(grouped[type_name]) < max(1, int(limit_per_type)):
-                grouped[type_name].append(row)
+    def _record_snapshot(self, muid: str, types: list[str], limit_per_type: int, envid: str | None = None) -> list[dict[str, Any]]:
+        refs = self._resolve_type_refs(types, muid)
         out: list[dict[str, Any]] = []
-        for type_name in types:
-            out.extend(grouped.get(type_name, []))
+        for ref in refs:
+            rows = self.store.list_records(
+                muid=ref["muid"],
+                types=[ref["type"]],
+                envid=envid,
+                include_global=envid is not None,
+                all_envids=False,
+                limit=max(1, int(limit_per_type)),
+                offset=0,
+            )
+            out.extend(rows[: max(1, int(limit_per_type))])
         return out
 
     def get_context(self, muid: str | None, types: list[Any] | None = None, render: str = "markdown", limit_per_type: int = DEFAULT_MEMORYD_LIMIT_PER_TYPE) -> dict[str, Any]:
@@ -677,20 +784,29 @@ class MemorydService:
 
         self.initialize()
         muid = self._normalize_muid(muid)
-        resolved_types = self._normalize_types(types)
-        rows = self.store.list_records(muid=muid, types=resolved_types or None, limit=max(1, int(limit_per_type)) * max(1, len(resolved_types) or 1))
-        grouped: dict[str, list[dict[str, Any]]] = {type_name: [] for type_name in resolved_types}
-        for row in rows:
-            type_name = str(row.get("type") or "").strip().lower()
-            if type_name in grouped and len(grouped[type_name]) < max(1, int(limit_per_type)):
-                grouped[type_name].append(row)
+        service_envid = self._service_envid()
+        resolved_types = self._normalize_type_specs(types)
+        refs = self._resolve_type_refs(resolved_types, muid)
+        grouped: dict[str, list[dict[str, Any]]] = {ref["spec"]: [] for ref in refs}
+        for ref in refs:
+            rows = self.store.list_records(
+                muid=ref["muid"],
+                types=[ref["type"]],
+                envid=service_envid,
+                include_global=service_envid is not None,
+                all_envids=False,
+                limit=max(1, int(limit_per_type)),
+                offset=0,
+            )
+            grouped[ref["spec"]].extend(rows[: max(1, int(limit_per_type))])
 
         lines: list[str] = []
-        for type_name in resolved_types:
-            items = grouped.get(type_name, [])
+        for ref in refs:
+            type_label = ref["spec"]
+            items = grouped.get(type_label, [])
             if not items:
                 continue
-            lines.append(f"[{type_name}]")
+            lines.append(f"[{type_label}]")
             for idx, row in enumerate(items, start=1):
                 title = str(row.get("title") or "").strip()
                 body = str(row.get("body") or "").strip()
@@ -703,6 +819,7 @@ class MemorydService:
             "text": text,
             "metadata": {
                 "muid": muid,
+                "envid": service_envid,
                 "types": resolved_types,
                 "selected_records_count": sum(len(v) for v in grouped.values()),
                 "render": render,
@@ -710,7 +827,16 @@ class MemorydService:
             },
         }
 
-    def list_records(self, muid: str | None, types: list[Any] | None = None, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    def list_records(
+        self,
+        muid: str | None,
+        types: list[Any] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+        *,
+        envid: str | None = None,
+        all_envids: bool = False,
+    ) -> dict[str, Any]:
         """List memory records as a page.
 
         Input: filters and pagination.
@@ -718,14 +844,26 @@ class MemorydService:
         """
 
         self.initialize()
-        muid = self._normalize_muid(muid)
-        resolved_types = self._normalize_types(types)
-        rows = self.store.list_records(muid=muid, types=resolved_types or None, limit=limit, offset=offset)
+        clean_muid = None if muid is None else self._normalize_muid(muid)
+        service_envid = self._normalize_envid(envid) if envid is not None else self._service_envid()
+        resolved_types = self._normalize_type_specs(types)
+        resolved_names = memoryd_type_names(resolved_types, self._enabled_types())
+        rows = self.store.list_records(
+            muid=clean_muid,
+            types=resolved_names or None,
+            envid=service_envid,
+            include_global=service_envid is not None,
+            all_envids=bool(all_envids),
+            limit=limit,
+            offset=offset,
+        )
         return {
             "items": rows,
             "offset": max(0, int(offset)),
             "limit": max(1, int(limit)),
-            "muid": muid,
+            "muid": clean_muid,
+            "envid": None if all_envids else service_envid,
+            "all_envids": bool(all_envids),
             "types": resolved_types,
         }
 
@@ -762,12 +900,19 @@ class MemorydService:
 
         self.initialize()
         muid = self._normalize_muid(muid)
-        resolved_types = self._normalize_types(types)
-        source_context_preview = _preview_data_block(serialize_json(normalize_json_value(source_context)), head=100, tail=100)
+        norm_source_context = normalize_json_value(source_context)
+        task_envid = self._service_envid()
+        if isinstance(norm_source_context, dict):
+            task_envid = self._normalize_envid(norm_source_context.get("envid")) or task_envid
+            if task_envid is not None and self._normalize_envid(norm_source_context.get("envid")) is None:
+                norm_source_context = dict(norm_source_context)
+                norm_source_context["envid"] = task_envid
+        resolved_types = self._normalize_type_specs(types)
+        source_context_preview = _preview_data_block(serialize_json(norm_source_context), head=100, tail=100)
         final_response_preview = _preview_data_block(str(final_response or ""), head=100, tail=100)
         request_override = str(request_text or "")
         request_override_preview = _preview_data_block(request_override, head=100, tail=100)
-        resolved_context_types = self._normalize_types(context_types)
+        resolved_context_types = self._normalize_type_specs(context_types)
         norm_provider = str(provider).strip() if provider is not None and str(provider).strip() else None
         norm_model = str(model).strip() if model is not None and str(model).strip() else None
         norm_tools = normalize_json_value(tools) if tools is not None else None
@@ -776,6 +921,7 @@ class MemorydService:
             "info",
             (
                 "enqueue memory task params "
+                f"envid={task_envid or '<global>'} "
                 f"muid={muid} caller_tag={str(caller_tag or '').strip() or '<none>'} "
                 f"work_hash={str(work_hash or '').strip() or '<none>'} "
                 f"provider={norm_provider or '<default>'} model={norm_model or '<default>'} "
@@ -801,7 +947,7 @@ class MemorydService:
         norm_top_k = None if top_k is None or str(top_k).strip() == "" else int(top_k)
         norm_min_p = None if min_p is None or str(min_p).strip() == "" else float(min_p)
         if norm_work_hash is not None:
-            inflight = self.store.find_inflight_tasks(muid, work_hash=norm_work_hash)
+            inflight = self._store_find_inflight_tasks(muid, work_hash=norm_work_hash, envid=task_envid)
             if inflight:
                 existing_task_id = str(inflight[0].get("task_id") or "")
                 log(
@@ -824,13 +970,14 @@ class MemorydService:
         queue_cfg = self._memoryd_model_cfg().get("queue", {}) if isinstance(self._memoryd_model_cfg(), dict) else {}
         cancel_policy = str(queue_cfg.get("cancel_policy", "cancel_previous_same_muid") or "cancel_previous_same_muid").strip().lower()
         if caller_tag is not None and cancel_policy != "keep_all":
-            pending = self.store.find_pending_tasks_by_key(muid, caller_tag=str(caller_tag).strip() or None)
+            pending = self._store_find_pending_tasks_by_key(muid, caller_tag=str(caller_tag).strip() or None, envid=task_envid)
             for row in pending:
                 self.store.delete_task(str(row.get("task_id") or ""))
         task_id = str(uuid4())
         self.store.create_task(
             {
                 "task_id": task_id,
+                "envid": task_envid,
                 "muid": muid,
                 "caller_tag": norm_caller_tag,
                 "work_hash": norm_work_hash,
@@ -852,7 +999,7 @@ class MemorydService:
                 "tools": norm_tools,
                 "context_types": resolved_context_types,
                 "requested_types": resolved_types,
-                "source_context": normalize_json_value(source_context),
+                "source_context": norm_source_context,
                 "final_response": str(final_response or ""),
                 "prio": int(self._memoryd_model_cfg().get("memory_task_prio", 0)),
             }
@@ -860,7 +1007,7 @@ class MemorydService:
 
         self._dispatch_after_enqueue_async(task_id)
 
-        return {"ok": True, "queued": True, "task_id": task_id, "muid": muid, "types": resolved_types}
+        return {"ok": True, "queued": True, "task_id": task_id, "envid": task_envid, "muid": muid, "types": resolved_types}
 
     def _dispatch_after_enqueue(self, task_id: str) -> None:
         """Run one non-cron worker tick after enqueue in background."""
@@ -916,6 +1063,8 @@ class MemorydService:
             raise TypeError("payload must be a dict")
         if "muid" not in payload or "type" not in payload:
             raise ValueError("muid and type are required")
+        clean_payload = dict(payload)
+        clean_payload["envid"] = self._normalize_envid(clean_payload.get("envid")) if "envid" in clean_payload else self._service_envid()
         body = str(payload.get("body") or payload.get("text") or "")
         body_preview = _preview_data_block(body, head=100, tail=100)
         log(
@@ -923,6 +1072,7 @@ class MemorydService:
             "info",
             (
                 "save memory params "
+                f"envid={str(clean_payload.get('envid') or '').strip() or '<global>'} "
                 f"muid={str(payload.get('muid') or '').strip().lower()} "
                 f"type={str(payload.get('type') or '').strip().lower()} "
                 f"title={str(payload.get('title') or '').strip()} "
@@ -930,7 +1080,7 @@ class MemorydService:
                 f"text_len={len(body)} text_preview={body_preview}"
             ),
         )
-        return self.store.upsert_record(payload)
+        return self.store.upsert_record(clean_payload)
 
     def _queue_state_url(self, provider: str, model: str) -> str:
         provider_cfg = self._provider_cfg(provider)
@@ -997,18 +1147,19 @@ class MemorydService:
             )
         return out
 
-    def _acquire_muid_lock(self, muid: str) -> bool:
+    def _acquire_muid_lock(self, envid: str | None, muid: str) -> bool:
         """Acquire a persistent advisory lock for one MUID.
 
         Input: canonical MUID.
         Output: True when lock is acquired.
         """
 
-        if muid in self._muid_lock_conns:
-            log("memoryd", "info", f"same-MUID advisory lock already held in-process for muid={muid}; reuse existing lock")
+        scope_key = f"{envid or ''}::{muid}"
+        if scope_key in self._muid_lock_conns:
+            log("memoryd", "info", f"same-MUID advisory lock already held in-process for envid={envid or '<global>'} muid={muid}; reuse existing lock")
             return True
 
-        lock_key = _muid_lock_key(muid)
+        lock_key = _muid_lock_key(envid, muid)
         conn = psycopg.connect(**self.store._db_cfg(), autocommit=True, row_factory=dict_row)
         try:
             with conn.cursor() as cur:
@@ -1017,11 +1168,11 @@ class MemorydService:
                 raw_locked = list(row.values())[0] if row else None
                 locked = bool(raw_locked)
                 if locked:
-                    self._muid_lock_conns[muid] = conn
+                    self._muid_lock_conns[scope_key] = conn
                     log(
                         "memoryd",
                         "info",
-                        f"same-MUID advisory lock acquired for muid={muid} lock_key={lock_key} pg_try_advisory_lock={raw_locked}",
+                        f"same-MUID advisory lock acquired for envid={envid or '<global>'} muid={muid} lock_key={lock_key} pg_try_advisory_lock={raw_locked}",
                     )
                     return True
                 log(
@@ -1029,51 +1180,78 @@ class MemorydService:
                     "warning",
                     (
                         "same-MUID advisory lock busy "
-                        f"for muid={muid} lock_key={lock_key} pg_try_advisory_lock={raw_locked}; "
+                        f"for envid={envid or '<global>'} muid={muid} lock_key={lock_key} pg_try_advisory_lock={raw_locked}; "
                         "lock is held by another DB session"
                     ),
                 )
         except Exception as e:
-            log("memoryd", "warning", f"same-MUID advisory lock check failed for muid={muid} lock_key={lock_key}: {e}")
+            log("memoryd", "warning", f"same-MUID advisory lock check failed for envid={envid or '<global>'} muid={muid} lock_key={lock_key}: {e}")
         conn.close()
         return False
 
-    def _release_muid_lock(self, muid: str) -> None:
+    def _release_muid_lock(self, envid: str | None, muid: str) -> None:
         """Release persistent advisory lock for one MUID.
 
         Input: canonical MUID.
         Output: none.
         """
 
-        conn = self._muid_lock_conns.pop(muid, None)
+        scope_key = f"{envid or ''}::{muid}"
+        conn = self._muid_lock_conns.pop(scope_key, None)
         if conn is None:
             return
-        lock_key = _muid_lock_key(muid)
+        lock_key = _muid_lock_key(envid, muid)
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
         except Exception as e:
-            log("memoryd", "warning", f"same-MUID advisory unlock failed for {muid}: {e}")
+            log("memoryd", "warning", f"same-MUID advisory unlock failed for envid={envid or '<global>'} muid={muid}: {e}")
         finally:
             conn.close()
 
-    def _apply_mutation(self, task: dict[str, Any], mutation: dict[str, Any], conn: Any | None = None) -> None:
-        muid = str(task.get("muid") or "").strip().lower()
-        requested_types = task.get("requested_types") or []
+    def _apply_mutation(self, task: dict[str, Any], mutation: dict[str, Any], conn: Any | None = None) -> tuple[str | None, str, str] | None:
+        task_envid = self._task_envid(task)
+        default_muid = str(task.get("muid") or "").strip().lower()
+        requested_refs = self._resolve_type_refs(task.get("requested_types") or [], default_muid)
+        refs_by_type: dict[str, list[dict[str, str]]] = {}
+        for ref in requested_refs:
+            refs_by_type.setdefault(ref["type"], []).append(ref)
+
         type_name = str(mutation.get("type") or "").strip().lower()
         record_id = mutation.get("id")
         operation = str(mutation.get("operation") or "").strip().upper()
         title = str(mutation.get("title") or "").strip()
         text = mutation.get("text")
         importance = int(mutation.get("importance", 5))
+        explicit_muid = normalize_muid(mutation.get("muid"))
+        target_muid = explicit_muid or None
 
-        if not type_name and len(requested_types) == 1:
-            type_name = str(requested_types[0]).strip().lower()
+        if not type_name and len(requested_refs) == 1:
+            type_name = requested_refs[0]["type"]
 
+        existing = None
         if record_id is not None:
             existing = self.store.get_record_by_id(record_id, conn=conn)
-            if existing and not type_name:
-                type_name = str(existing.get("type") or "").strip().lower()
+            if existing:
+                existing_envid = self._normalize_envid(existing.get("envid"))
+                if existing_envid != task_envid:
+                    raise ValueError("record scope does not match task envid")
+                target_muid = self._normalize_muid(existing.get("muid"))
+                if not type_name:
+                    type_name = str(existing.get("type") or "").strip().lower()
+
+        if not target_muid:
+            if type_name:
+                matches_for_type = refs_by_type.get(type_name, [])
+                if len(matches_for_type) > 1:
+                    raise ValueError(f"ambiguous target muid for type: {type_name}")
+                if len(matches_for_type) == 1:
+                    target_muid = matches_for_type[0]["muid"]
+            elif len(requested_refs) == 1:
+                target_muid = requested_refs[0]["muid"]
+
+        if not target_muid:
+            target_muid = default_muid
 
         if not operation:
             if record_id is None:
@@ -1084,37 +1262,39 @@ class MemorydService:
         if operation == "DELETE":
             if record_id is not None:
                 self.store.delete_record_by_id(record_id, conn=conn)
-                return
+                return None
             if not (type_name and title):
                 raise ValueError("title-based delete requires type and title")
-            matches = self.store.find_records_by_title(muid, type_name, title, conn=conn)
+            matches = self.store.find_records_by_title(target_muid, type_name, title, envid=task_envid, conn=conn)
             if len(matches) != 1:
                 raise ValueError(f"ambiguous or missing title match for delete: {title}")
             self.store.delete_record_by_id(matches[0]["id"], conn=conn)
-            return
+            return None
 
         if operation in {"INSERT", "UPDATE"}:
             if record_id is not None:
                 payload = {
                     "id": record_id,
-                    "muid": muid,
+                    "envid": task_envid,
+                    "muid": target_muid,
                     "type": type_name,
                     "title": title,
                     "body": str(text or ""),
                     "importance": importance,
                 }
                 self.store.upsert_record(payload, conn=conn)
-                return
+                return (task_envid, target_muid, type_name)
 
             if not (type_name and title):
                 raise ValueError("title-based insert/update requires type and title")
-            matches = self.store.find_records_by_title(muid, type_name, title, conn=conn)
+            matches = self.store.find_records_by_title(target_muid, type_name, title, envid=task_envid, conn=conn)
             if len(matches) > 1:
                 raise ValueError(f"ambiguous title match for update: {title}")
             if len(matches) == 1:
                 payload = {
                     "id": matches[0]["id"],
-                    "muid": muid,
+                    "envid": task_envid,
+                    "muid": target_muid,
                     "type": type_name,
                     "title": title,
                     "body": str(text or ""),
@@ -1122,18 +1302,19 @@ class MemorydService:
                 }
             else:
                 payload = {
-                    "muid": muid,
+                    "envid": task_envid,
+                    "muid": target_muid,
                     "type": type_name,
                     "title": title,
                     "body": str(text or ""),
                     "importance": importance,
                 }
             self.store.upsert_record(payload, conn=conn)
-            return
+            return (task_envid, target_muid, type_name)
 
         raise ValueError(f"unsupported operation: {operation}")
 
-    def _prune_after_task(self, muid: str, types: list[str], conn: Any | None = None) -> int:
+    def _prune_after_task(self, muid: str, types: list[str], envid: str | None = None, conn: Any | None = None) -> int:
         md_cfg = self._memoryd_model_cfg()
         items_cfg = md_cfg.get("items", {}) if isinstance(md_cfg, dict) else {}
         pruned = 0
@@ -1146,15 +1327,28 @@ class MemorydService:
                 type_name=type_name,
                 max_record_count=int(cfg.get("max_record_count", 50)),
                 max_content_length=int(cfg.get("max_content_length", 8196)),
+                envid=envid,
                 conn=conn,
             )
         return pruned
 
+    def _prune_task_targets(self, targets: set[tuple[str | None, str, str]], conn: Any | None = None) -> int:
+        pruned = 0
+        for envid, muid, type_name in sorted(targets):
+            try:
+                pruned += self._prune_after_task(muid, [type_name], envid=envid, conn=conn)
+            except TypeError as error:
+                if not self._is_signature_compat_error(error):
+                    raise
+                pruned += self._prune_after_task(muid, [type_name], conn=conn)
+        return pruned
+
     def _process_task(self, task: dict[str, Any]) -> dict[str, Any]:
         muid = str(task.get("muid") or "").strip().lower()
+        task_envid = self._task_envid(task)
         task_id = str(task.get("task_id") or "")
-        requested_types = [str(x).strip().lower() for x in (deserialize_json(task.get("requested_types"), []) or []) if str(x).strip()]
-        context_types = [str(x).strip().lower() for x in (deserialize_json(task.get("context_types"), []) or []) if str(x).strip()]
+        requested_types = self._normalize_type_specs(deserialize_json(task.get("requested_types"), []) or [])
+        context_types = self._normalize_type_specs(deserialize_json(task.get("context_types"), []) or [])
         request_override = str(task.get("request_text") or "").strip()
         if not muid:
             raise ValueError("task muid is required")
@@ -1181,7 +1375,7 @@ class MemorydService:
                 log(
                     "memoryd",
                     "info",
-                    f"memoryd task uses request_text override for task_id={task_id} muid={muid} request_text_len={len(request_text)}",
+                    f"memoryd task uses request_text override for task_id={task_id} envid={task_envid or '<global>'} muid={muid} request_text_len={len(request_text)}",
                 )
             else:
                 request_file = self._resolve_request_file_for_task(task, requested_types)
@@ -1191,7 +1385,7 @@ class MemorydService:
                     log(
                         "memoryd",
                         "warning",
-                        f"memoryd task skipped: no exact request_file for task_id={task_id} muid={muid} types={requested_types}",
+                        f"memoryd task skipped: no exact request_file for task_id={task_id} envid={task_envid or '<global>'} muid={muid} types={requested_types}",
                     )
                     return {"status": "skipped", "pruned": 0}
 
@@ -1207,18 +1401,18 @@ class MemorydService:
                 "info",
                 (
                     "memoryd task phase=build_snapshot "
-                    f"task_id={task_id} muid={muid} provider={provider} model={model} "
+                    f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} provider={provider} model={model} "
                     f"requested_types={requested_types} context_types={context_types or requested_types}"
                 ),
             )
-            snapshot = self._record_snapshot(muid, context_types or requested_types, DEFAULT_MEMORYD_LIMIT_PER_TYPE)
+            snapshot = self._record_snapshot_for_task(muid, context_types or requested_types, DEFAULT_MEMORYD_LIMIT_PER_TYPE, envid=task_envid)
             self.store.update_task_phase(task_id, "build_messages")
             log(
                 "memoryd",
                 "info",
                 (
                     "memoryd task phase=build_messages "
-                    f"task_id={task_id} muid={muid} snapshot_items={len(snapshot)} request_text_len={len(request_text)}"
+                    f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} snapshot_items={len(snapshot)} request_text_len={len(request_text)}"
                 ),
             )
             messages = self._build_llm_messages(request_text, task, snapshot)
@@ -1255,7 +1449,7 @@ class MemorydService:
                 "info",
                 (
                     "memoryd task phase=build_llm "
-                    f"task_id={task_id} muid={muid} provider={provider} model={model} tools_present={task_tools is not None}"
+                    f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} provider={provider} model={model} tools_present={task_tools is not None}"
                 ),
             )
             llm = build_llm(self.config, **build_kwargs)
@@ -1272,7 +1466,7 @@ class MemorydService:
                 log(
                     "memoryd",
                     "info",
-                    f"memoryd task phase=invoke_llm task_id={task_id} muid={muid} messages={len(messages)}",
+                    f"memoryd task phase=invoke_llm task_id={task_id} envid={task_envid or '<global>'} muid={muid} messages={len(messages)}",
                 )
                 response = llm.invoke(messages)
             finally:
@@ -1285,7 +1479,7 @@ class MemorydService:
                     "warning",
                     (
                         "memoryd late LLM response ignored "
-                        f"task_id={task_id} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')}"
+                        f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')}"
                     ),
                 )
                 return {"status": "skipped", "pruned": 0, "reason": "late_response_ignored"}
@@ -1293,22 +1487,25 @@ class MemorydService:
             log(
                 "memoryd",
                 "info",
-                f"memoryd task phase=parse_mutations task_id={task_id} muid={muid}",
+                f"memoryd task phase=parse_mutations task_id={task_id} envid={task_envid or '<global>'} muid={muid}",
             )
             mutations = self._parse_mutations(getattr(response, "content", response))
 
             with self.store._tx_conn() as tx_conn:
                 self.store.update_task_phase(task_id, "apply_mutations", conn=tx_conn)
+                touched_targets: set[tuple[str | None, str, str]] = set()
                 for mutation in mutations:
-                    self._apply_mutation(task, mutation, conn=tx_conn)
+                    touched = self._apply_mutation(task, mutation, conn=tx_conn)
+                    if touched is not None:
+                        touched_targets.add(touched)
 
-                pruned = self._prune_after_task(muid, requested_types or self._enabled_types(), conn=tx_conn)
+                pruned = self._prune_task_targets(touched_targets, conn=tx_conn)
                 self.store.update_task_phase(task_id, "done", conn=tx_conn)
                 self.store.mark_task_done(task["task_id"], conn=tx_conn)
             log(
                 "memoryd",
                 "info",
-                f"memoryd task phase=done task_id={task_id} muid={muid} mutations={len(mutations)} pruned={pruned}",
+                f"memoryd task phase=done task_id={task_id} envid={task_envid or '<global>'} muid={muid} mutations={len(mutations)} pruned={pruned}",
             )
             return {"status": "done", "pruned": pruned, "mutations": len(mutations)}
         except Exception as e:
@@ -1320,13 +1517,13 @@ class MemorydService:
                     "warning",
                     (
                         "memoryd late task exception ignored "
-                        f"task_id={task_id} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')} error={err}"
+                        f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} current_status={current.get('status')} current_phase={current.get('phase')} error={err}"
                     ),
                 )
                 return {"status": "skipped", "error": err, "pruned": 0}
             self.store.update_task_phase(task_id, "failed")
             self.store.mark_task_failed(task["task_id"], err)
-            log("memoryd", "error", f"memoryd task failed task_id={task_id} muid={muid}: {err}")
+            log("memoryd", "error", f"memoryd task failed task_id={task_id} envid={task_envid or '<global>'} muid={muid}: {err}")
             return {"status": "failed", "error": err, "pruned": 0}
 
     def _resolve_model_for_provider(self, provider: str, model: str | None = None) -> str:
@@ -1361,6 +1558,7 @@ class MemorydService:
 
         for task in tasks:
             muid = str(task.get("muid") or "").strip().lower()
+            task_envid = self._task_envid(task)
             task_id = str(task.get("task_id") or "")
             provider = self._active_provider()
             model = self._active_model()
@@ -1381,35 +1579,35 @@ class MemorydService:
                         "info",
                         (
                             "memoryd task waiting for provider queue "
-                            f"task_id={task_id} muid={muid} provider={provider} model={model} priority={priority} "
+                            f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} provider={provider} model={model} priority={priority} "
                             f"queue_state={queue_state}"
                         ),
                     )
                     continue
 
-            first_try = self._acquire_muid_lock(muid)
+            first_try = self._acquire_muid_lock(task_envid, muid)
             if not first_try:
                 self.store.update_task_phase(task_id, "waiting_muid_lock")
                 self.store.update_task_error(task_id, f"waiting for same-MUID advisory lock for muid={muid}")
                 caller_tag = str(task.get("caller_tag") or "").strip() or "<none>"
-                lock_key = _muid_lock_key(muid)
+                lock_key = _muid_lock_key(task_envid, muid)
                 log(
                     "memoryd",
                     "info",
                     (
                         "same-MUID advisory lock contention "
-                        f"task_id={task_id} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
+                        f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
                         "first_try=False; retrying once"
                     ),
                 )
-                second_try = self._acquire_muid_lock(muid)
+                second_try = self._acquire_muid_lock(task_envid, muid)
                 if not second_try:
                     log(
                         "memoryd",
                         "info",
                         (
                             "same-MUID advisory lock skip "
-                            f"task_id={task_id} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
+                            f"task_id={task_id} envid={task_envid or '<global>'} muid={muid} caller_tag={caller_tag} lock_key={lock_key} "
                             "second_try=False; task stays pending for next tick"
                         ),
                     )
@@ -1423,7 +1621,7 @@ class MemorydService:
                     counters["skipped"] += 1
                     continue
 
-                log("memoryd", "info", f"memoryd task marked running task_id={task_id} muid={muid}")
+                log("memoryd", "info", f"memoryd task marked running task_id={task_id} envid={task_envid or '<global>'} muid={muid}")
                 counters["started"] += 1
                 result = self._process_task(task)
                 status = result.get("status")
@@ -1436,7 +1634,7 @@ class MemorydService:
                     counters["failed"] += 1
             finally:
                 try:
-                    self._release_muid_lock(muid)
+                    self._release_muid_lock(task_envid, muid)
                 except Exception:
                     pass
 
@@ -1471,16 +1669,17 @@ def _instrument_memoryd_service_calls() -> None:
 _instrument_memoryd_service_calls()
 
 
-def get_memoryd_service(root_dir: str, config: dict[str, Any]) -> MemorydService:
+def get_memoryd_service(root_dir: str, config: dict[str, Any], current_envid: str | None = None) -> MemorydService:
     """Return cached memoryd service for root+config pair.
 
     Input: root directory and app config.
     Output: initialized MemorydService instance.
     """
 
-    key = (root_dir, id(config))
+    clean_envid = str(current_envid or "").strip() or None
+    key = (root_dir, id(config), clean_envid)
     svc = _SERVICES.get(key)
     if svc is None:
-        svc = MemorydService(root_dir, config)
+        svc = MemorydService(root_dir, config, current_envid=clean_envid)
         _SERVICES[key] = svc
     return svc

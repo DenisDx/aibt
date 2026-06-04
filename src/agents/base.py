@@ -12,6 +12,7 @@ from core.llm_wiretap import push_llm_log_context
 from core.logging_utils import log
 from memory.tools import MemoryTools
 from memoryd import get_memoryd_service
+from memoryd.schemas import normalize_memoryd_type_specs, split_memoryd_type_spec
 
 
 class AgentBase(ABC):
@@ -142,7 +143,7 @@ class AgentBase(ABC):
         try:
             memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
             if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
-                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config, current_envid=envid)
                 memoryd_service.initialize()
                 muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
                 context_types = self._resolve_memoryd_context_types(effective_config)
@@ -225,7 +226,7 @@ class AgentBase(ABC):
             effective_config = build_effective_config(self.app_config, envid)
             memoryd_cfg = effective_config.get("memoryd", {}) if isinstance(effective_config, dict) else {}
             if isinstance(memoryd_cfg, dict) and bool(memoryd_cfg.get("enabled", False)):
-                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config)
+                memoryd_service = get_memoryd_service(str(self.app_config.get("root") or os.getcwd()), effective_config, current_envid=envid)
                 memoryd_service.initialize()
                 muid = str(ctx.get("muid") or ctx.get("chat_id") or ctx.get("user_id") or memoryd_cfg.get("muid") or "").strip() or None
                 update_types = self._resolve_memoryd_update_types(effective_config)
@@ -341,16 +342,23 @@ class AgentBase(ABC):
         policy = self._agent_memoryd_cfg()
         raw = policy.get(key) if isinstance(policy, dict) else None
         if raw is None:
-            requested = list(default_types)
+            requested = normalize_memoryd_type_specs(default_types)
         elif isinstance(raw, list):
-            requested = [str(item).strip().lower() for item in raw if str(item).strip()]
+            requested = normalize_memoryd_type_specs(raw)
         else:
             log("agents", "warning", f"Invalid memoryd policy for agent={self.name}: {key} must be list; fallback to defaults")
-            requested = list(default_types)
+            requested = normalize_memoryd_type_specs(default_types)
 
         allowed = set(str(x).strip().lower() for x in allowed_types if str(x).strip())
-        requested_set = {item for item in requested if item}
-        dropped = sorted(item for item in requested_set if item not in allowed)
+        out: list[str] = []
+        dropped: list[str] = []
+        for item in requested:
+            _, type_name = split_memoryd_type_spec(item)
+            if type_name in allowed:
+                if item not in out:
+                    out.append(item)
+            elif item not in dropped:
+                dropped.append(item)
         if dropped:
             log(
                 "agents",
@@ -358,7 +366,6 @@ class AgentBase(ABC):
                 "Memoryd policy for "
                 f"agent={self.name} ignored unsupported {key}: {dropped}; allowed={sorted(allowed)}",
             )
-        out = sorted(item for item in requested_set if item in allowed)
         return out
 
     def _resolve_memoryd_context_types(self, effective_config: dict[str, Any]) -> list[str]:

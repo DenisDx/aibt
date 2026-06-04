@@ -64,6 +64,106 @@ def normalize_types(types: list[Any] | None, allowed_types: list[str] | None = N
     return sorted(out)
 
 
+def split_memoryd_type_spec(value: Any) -> tuple[str | None, str]:
+    """Split optional `muid:type` spec into normalized parts.
+
+    Input: raw type spec.
+    Output: (muid or None, type name).
+    """
+
+    text = clean_text(value)
+    if not text:
+        return (None, "")
+    if ":" not in text:
+        return (None, text)
+    muid_part, type_part = text.split(":", 1)
+    muid = clean_text(muid_part) or None
+    type_name = clean_text(type_part)
+    return (muid, type_name)
+
+
+def normalize_memoryd_type_spec(value: Any, allowed_types: list[str] | None = None) -> str | None:
+    """Normalize one memoryd type spec with optional base-type filtering.
+
+    Input: raw `type` or `muid:type` spec and optional allowed base types.
+    Output: normalized spec or None when invalid/not allowed.
+    """
+
+    log("memoryd", "debug", "call memoryd.schemas.normalize_memoryd_type_spec")
+    muid, type_name = split_memoryd_type_spec(value)
+    if not type_name:
+        return None
+    allowed = {clean_text(t) for t in (allowed_types or []) if clean_text(t)} if allowed_types else None
+    if allowed is not None and type_name not in allowed:
+        return None
+    if muid:
+        return f"{muid}:{type_name}"
+    return type_name
+
+
+def normalize_memoryd_type_specs(values: list[Any] | None, allowed_types: list[str] | None = None) -> list[str]:
+    """Normalize ordered unique memoryd type specs.
+
+    Input: list of `type` or `muid:type` entries and optional allowed base types.
+    Output: normalized unique specs in input order.
+    """
+
+    log("memoryd", "debug", "call memoryd.schemas.normalize_memoryd_type_specs")
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for raw in values:
+        spec = normalize_memoryd_type_spec(raw, allowed_types=allowed_types)
+        if spec and spec not in out:
+            out.append(spec)
+    return out
+
+
+def memoryd_type_names(values: list[Any] | None, allowed_types: list[str] | None = None) -> list[str]:
+    """Extract unique normalized base type names from specs.
+
+    Input: list of `type` or `muid:type` entries.
+    Output: normalized base type names in stable order.
+    """
+
+    log("memoryd", "debug", "call memoryd.schemas.memoryd_type_names")
+    out: list[str] = []
+    for spec in normalize_memoryd_type_specs(values, allowed_types=allowed_types):
+        _, type_name = split_memoryd_type_spec(spec)
+        if type_name and type_name not in out:
+            out.append(type_name)
+    return out
+
+
+def resolve_memoryd_type_specs(
+    values: list[Any] | None,
+    *,
+    default_muid: Any,
+    allowed_types: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Resolve type specs into concrete `(muid, type)` targets.
+
+    Input: spec list, default muid, and optional allowed base types.
+    Output: ordered resolved targets with `spec`, `muid`, and `type` keys.
+    """
+
+    log("memoryd", "debug", "call memoryd.schemas.resolve_memoryd_type_specs")
+    fallback_muid = normalize_muid(default_muid)
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in normalize_memoryd_type_specs(values, allowed_types=allowed_types):
+        spec_muid, type_name = split_memoryd_type_spec(spec)
+        resolved_muid = normalize_muid(spec_muid or fallback_muid)
+        if not resolved_muid or not type_name:
+            continue
+        key = (resolved_muid, type_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"spec": spec, "muid": resolved_muid, "type": type_name})
+    return out
+
+
 def normalize_muid(muid: Any) -> str:
     """Normalize MUID to canonical lowercase text.
 

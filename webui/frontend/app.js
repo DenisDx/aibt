@@ -904,10 +904,15 @@ async function loadMemorydEnvids() {
   _memorydEnvids = Array.isArray(data.items) ? data.items : [];
   sel.innerHTML = '';
 
-  const empty = document.createElement('option');
-  empty.value = '';
-  empty.textContent = '(base config)';
-  sel.appendChild(empty);
+  const base = document.createElement('option');
+  base.value = '';
+  base.textContent = '(base/global only)';
+  sel.appendChild(base);
+
+  const all = document.createElement('option');
+  all.value = '__all__';
+  all.textContent = '(all envids)';
+  sel.appendChild(all);
 
   _memorydEnvids.forEach(item => {
     const opt = document.createElement('option');
@@ -935,11 +940,18 @@ async function loadMemorydMuids() {
   _memorydMuids = Array.isArray(data.items) ? data.items : [];
   sel.innerHTML = '';
 
+  const allOpt = document.createElement('option');
+  allOpt.value = '__all__';
+  allOpt.textContent = '(all MUIDs)';
+  sel.appendChild(allOpt);
+
   const defaultMuid = String(data.default_muid || 'default').trim();
   const defaultOpt = document.createElement('option');
   defaultOpt.value = defaultMuid;
   defaultOpt.textContent = `(default) ${defaultMuid}`;
-  sel.appendChild(defaultOpt);
+  if (defaultMuid && defaultMuid !== '__all__') {
+    sel.appendChild(defaultOpt);
+  }
 
   _memorydMuids.forEach(muid => {
     const opt = document.createElement('option');
@@ -961,7 +973,9 @@ async function loadMemorydTypes() {
   const envidSel = document.getElementById('memoryd-envid-select');
   const envid = String(envidSel?.value || '').trim();
   const item = _memorydEnvids.find(x => String(x.envid || '') === envid) || null;
-  const types = Array.isArray(item?.types) && item.types.length ? item.types : ['episodic', 'semantic', 'summaries', 'profiles'];
+  const types = envid === '__all__'
+    ? Array.from(new Set(_memorydEnvids.flatMap(x => Array.isArray(x?.types) ? x.types : []))).sort()
+    : (Array.isArray(item?.types) && item.types.length ? item.types : ['episodic', 'semantic', 'summaries', 'profiles']);
   const active = new Set(_memorydSelectedTypes.length ? _memorydSelectedTypes : types);
   wrap.innerHTML = '';
   types.forEach(typeName => {
@@ -997,6 +1011,7 @@ async function loadMemorydRecords() {
   const out = document.getElementById('memoryd-record-output');
   if (!muidSel || !out) return;
   const muid = String(muidSel.value || '').trim();
+  const allMuids = muid === '__all__';
   const envid = String(envidSel?.value || '').trim();
   const types = _memorydSelectedTypes.length ? _memorydSelectedTypes : Array.from(document.querySelectorAll('#memoryd-types input[type=checkbox]:checked')).map(el => String(el.value || '').trim()).filter(Boolean);
   if (!muid) {
@@ -1004,7 +1019,11 @@ async function loadMemorydRecords() {
     return;
   }
   const qs = new URLSearchParams();
-  qs.set('muid', muid);
+  if (allMuids) {
+    qs.set('muid', '__all__');
+  } else {
+    qs.set('muid', muid);
+  }
   if (types.length) qs.set('types', types.join(','));
   if (envid) qs.set('envid', envid);
   try {

@@ -27,10 +27,50 @@ class _FakeMemorydService:
     def __init__(self) -> None:
         self.last_enqueue = None
         self.last_list_active_tasks = None
+        self.last_list_muids = None
+        self.last_list_records = None
 
     def enqueue_update(self, **kwargs):
         self.last_enqueue = dict(kwargs)
         return {"ok": True, "queued": True, "task_id": "task-1"}
+
+    def list_muids(self, limit: int = 200, *, envid: str | None = None, all_envids: bool = False):
+        self.last_list_muids = {"limit": limit, "envid": envid, "all_envids": all_envids}
+        return ["default", "chat-1", "chat-2"]
+
+    def list_records(
+        self,
+        muid: str | None,
+        types=None,
+        offset: int = 0,
+        limit: int = 100,
+        *,
+        envid: str | None = None,
+        all_envids: bool = False,
+    ):
+        self.last_list_records = {
+            "muid": muid,
+            "types": list(types or []),
+            "offset": offset,
+            "limit": limit,
+            "envid": envid,
+            "all_envids": all_envids,
+        }
+        return {
+            "items": [
+                {
+                    "id": 1,
+                    "muid": muid or "chat-1",
+                    "type": "semantic",
+                    "title": "hello",
+                    "body": "world",
+                    "importance": 5,
+                }
+            ],
+            "total": 1,
+            "offset": offset,
+            "limit": limit,
+        }
 
     def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0):
         self.last_list_active_tasks = {"envid": envid, "limit": limit, "offset": offset}
@@ -165,6 +205,33 @@ class MemorydApiTest(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].get("status"), "pending")
         self.assertEqual(items[0].get("request_text"), "Summarize recent dialogue and update semantic memory.")
+
+    def test_memoryd_muids_supports_all_envids_scope(self) -> None:
+        res = self.client.get("/api/memoryd/muids?envid=__all__")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data.get("ok"))
+        self.assertTrue(data.get("all_envids"))
+        self.assertEqual(self.fake_memoryd.last_list_muids, {"limit": 500, "envid": None, "all_envids": True})
+        self.assertEqual(data.get("items"), ["default", "chat-1", "chat-2"])
+
+    def test_memoryd_records_supports_all_muids_and_all_envids(self) -> None:
+        res = self.client.get("/api/memoryd/records?muid=__all__&envid=__all__&types=semantic,profiles&limit=50&offset=10")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(
+            self.fake_memoryd.last_list_records,
+            {
+                "muid": None,
+                "types": ["semantic", "profiles"],
+                "offset": 10,
+                "limit": 50,
+                "envid": None,
+                "all_envids": True,
+            },
+        )
+        self.assertEqual(len(data.get("items") or []), 1)
 
 
 if __name__ == "__main__":

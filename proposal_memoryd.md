@@ -553,3 +553,35 @@ Phase 3:
 ## Open TBD List
 
 - none.
+
+## UPDATE 1
+
+Implemented design correction for MemoryD scope identity and per-type target overrides.
+
+1. Scope identity is now `(envid, muid)`, not just `muid`.
+  - `memoryd_records` and `memoryd_tasks` now store explicit `envid`.
+  - The same `muid` may exist independently in different `envid` values without collisions in records, queue replacement, inflight dedup, or advisory locks.
+  - Global/shared MemoryD data is represented by `envid = null`.
+
+2. Read scope and write scope are intentionally different.
+  - Reads from a service bound to one `current_envid` see records from that exact `envid` plus global records.
+  - Writes always target one exact scope only and never fan out across visible fallback scopes.
+
+3. `context_types` and `update_types` now support both plain type names and `muid:type` specs.
+  - Examples: `semantic`, `profiles`, `shared:news`, `team42:todo`.
+  - The suffix after `:` is still validated against enabled MemoryD item types.
+  - The optional `muid` prefix changes the target/read namespace for that one type only.
+
+4. Request-template matching still works by base type names.
+  - `memoryd.requests[*].types` remain base type names such as `news` or `semantic`.
+  - A task that requests `shared:news` is matched as type `news` for request-template resolution.
+
+5. Runtime callers must bind MemoryD explicitly to the active `envid`.
+  - Agent prompt reads, async update enqueue, Memory Executor flows, and WebUI-backed MemoryD service creation must all pass the selected `envid` into the MemoryD service.
+
+6. Practical consequence for agents.
+  - If agent config says `shared:news`, the agent must read or write `news` in MUID `shared`.
+  - This is not a hint; it is the exact target namespace for that type.
+
+7. Remaining semantic note.
+  - If one task requests the same base type multiple times through different MUID prefixes, mutation application still needs unambiguous `type` selection from the LLM output. Current implementation resolves writes against the requested spec set, but prompt/template conventions should avoid ambiguous duplicate base-type targets where possible.

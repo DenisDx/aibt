@@ -90,6 +90,7 @@ class MemorydStore:
                     """
                     CREATE TABLE IF NOT EXISTS memoryd_records (
                       id BIGSERIAL PRIMARY KEY,
+                                            envid TEXT,
                       muid TEXT NOT NULL,
                       type TEXT NOT NULL,
                       title TEXT NOT NULL DEFAULT '',
@@ -105,6 +106,7 @@ class MemorydStore:
                     """
                     CREATE TABLE IF NOT EXISTS memoryd_tasks (
                       task_id UUID PRIMARY KEY,
+                                            envid TEXT,
                       muid TEXT NOT NULL,
                       caller_tag TEXT,
                                             work_hash TEXT,
@@ -139,7 +141,9 @@ class MemorydStore:
                     )
                     """
                 )
+                cur.execute("ALTER TABLE memoryd_records ADD COLUMN IF NOT EXISTS envid TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS work_hash TEXT")
+                cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS envid TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS provider TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS model TEXT")
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS phase TEXT")
@@ -175,17 +179,51 @@ class MemorydStore:
                     """
                 )
                 cur.execute("ALTER TABLE memoryd_tasks ADD COLUMN IF NOT EXISTS request_text TEXT")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_muid_type_updated ON memoryd_records(muid, type, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_lookup ON memoryd_records(muid, type, title)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_envid_muid_type_updated ON memoryd_records(envid, muid, type, updated_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_records_envid_lookup ON memoryd_records(envid, muid, type, title)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_status_prio_created ON memoryd_tasks(status, prio DESC, created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_muid_caller_status ON memoryd_tasks(muid, caller_tag, status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_muid_workhash_status ON memoryd_tasks(muid, work_hash, status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_envid_muid_caller_status ON memoryd_tasks(envid, muid, caller_tag, status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_envid_muid_workhash_status ON memoryd_tasks(envid, muid, work_hash, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_memoryd_tasks_created ON memoryd_tasks(created_at ASC)")
 
     def _json_value(self, value: Any) -> Any:
         if Json is None:
             return value
         return Json(value)
+
+    def _normalize_envid(self, envid: Any) -> str | None:
+        text = str(envid or "").strip()
+        return text or None
+
+    def _append_exact_envid_clause(self, where: list[str], params: list[Any], envid: str | None) -> None:
+        clean_envid = self._normalize_envid(envid)
+        if clean_envid is None:
+            where.append("envid IS NULL")
+            return
+        where.append("envid=%s")
+        params.append(clean_envid)
+
+    def _append_visible_envid_clause(
+        self,
+        where: list[str],
+        params: list[Any],
+        envid: str | None,
+        *,
+        include_global: bool,
+        all_envids: bool,
+    ) -> None:
+        if all_envids:
+            return
+        clean_envid = self._normalize_envid(envid)
+        if clean_envid is None:
+            where.append("envid IS NULL")
+            return
+        if include_global:
+            where.append("(envid=%s OR envid IS NULL)")
+            params.append(clean_envid)
+            return
+        where.append("envid=%s")
+        params.append(clean_envid)
 
     def upsert_record(self, record: dict[str, Any], conn: Any | None = None) -> dict[str, Any]:
         """Insert or update one memoryd record.
@@ -194,6 +232,7 @@ class MemorydStore:
         Output: persisted record row.
         """
 
+        envid = self._normalize_envid(record.get("envid"))
         muid = str(record["muid"]).strip().lower()
         type_name = str(record["type"]).strip().lower()
         title = str(record.get("title") or "").strip()
@@ -206,7 +245,7 @@ class MemorydStore:
             "info",
             (
                 "save memory store params "
-                f"muid={muid} type={type_name} title={title} "
+                f"envid={envid or '<global>'} muid={muid} type={type_name} title={title} "
                 f"importance={importance} tags_count={len(tags) if isinstance(tags, list) else 0} "
                 f"text_len={len(body)} text_preview={body_preview}"
             ),
@@ -218,10 +257,11 @@ class MemorydStore:
                 if record_id:
                     cur.execute(
                         """
-                        INSERT INTO memoryd_records(id, muid, type, title, body, importance, tags)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO memoryd_records(id, envid, muid, type, title, body, importance, tags)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT(id) DO UPDATE
-                          SET muid=EXCLUDED.muid,
+                          SET envid=EXCLUDED.envid,
+                              muid=EXCLUDED.muid,
                               type=EXCLUDED.type,
                               title=EXCLUDED.title,
                               body=EXCLUDED.body,
@@ -230,16 +270,16 @@ class MemorydStore:
                               updated_at=now()
                         RETURNING *
                         """,
-                        (record_id, muid, type_name, title, body, importance, self._json_value(tags)),
+                        (record_id, envid, muid, type_name, title, body, importance, self._json_value(tags)),
                     )
                 else:
                     cur.execute(
                         """
-                        INSERT INTO memoryd_records(muid, type, title, body, importance, tags)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        INSERT INTO memoryd_records(envid, muid, type, title, body, importance, tags)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         RETURNING *
                         """,
-                        (muid, type_name, title, body, importance, self._json_value(tags)),
+                        (envid, muid, type_name, title, body, importance, self._json_value(tags)),
                     )
                 row = cur.fetchone()
                 return dict(row) if row else {}
@@ -264,7 +304,7 @@ class MemorydStore:
             with own_conn.cursor() as cur:
                 cur.execute("DELETE FROM memoryd_records WHERE id=%s", (record_id,))
 
-    def find_records_by_title(self, muid: str, type_name: str, title: str, conn: Any | None = None) -> list[dict[str, Any]]:
+    def find_records_by_title(self, muid: str, type_name: str, title: str, envid: str | None = None, conn: Any | None = None) -> list[dict[str, Any]]:
         """Return records matching title exactly within one MUID and type.
 
         Input: muid, type, title.
@@ -273,14 +313,16 @@ class MemorydStore:
 
         def _execute(active_conn: Any) -> list[dict[str, Any]]:
             with active_conn.cursor() as cur:
+                where = ["muid=%s", "type=%s", "title=%s"]
+                params: list[Any] = [muid, type_name, title]
+                self._append_exact_envid_clause(where, params, envid)
                 cur.execute(
-                    """
-                    SELECT *
-                    FROM memoryd_records
-                    WHERE muid=%s AND type=%s AND title=%s
-                    ORDER BY updated_at DESC, id DESC
-                    """,
-                    (muid, type_name, title),
+                    (
+                        "SELECT * FROM memoryd_records WHERE "
+                        + " AND ".join(where)
+                        + " ORDER BY updated_at DESC, id DESC"
+                    ),
+                    tuple(params),
                 )
                 return [dict(row) for row in cur.fetchall()]
 
@@ -307,23 +349,40 @@ class MemorydStore:
         with self._conn() as own_conn:
             return _execute(own_conn)
 
-    def list_records(self, muid: str, types: list[str] | None = None, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def list_records(
+        self,
+        muid: str | None,
+        types: list[str] | None = None,
+        *,
+        envid: str | None = None,
+        include_global: bool = False,
+        all_envids: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         """List memoryd records with optional filters.
 
-        Input: muid, optional type list, offset/limit.
+        Input: optional muid, optional type list, offset/limit.
         Output: ordered record rows.
         """
 
-        params: list[Any] = [muid]
-        where = ["muid=%s"]
+        params: list[Any] = []
+        where: list[str] = []
+        if muid is not None:
+            params.append(muid)
+            where.append("muid=%s")
+        self._append_visible_envid_clause(where, params, envid, include_global=include_global, all_envids=all_envids)
         if types:
             where.append("type = ANY(%s)")
             params.append(types)
         params.extend([max(1, int(limit)), max(0, int(offset))])
+        where_sql = ""
+        if where:
+            where_sql = "WHERE " + " AND ".join(where)
         sql = f"""
             SELECT *
             FROM memoryd_records
-            WHERE {' AND '.join(where)}
+            {where_sql}
             ORDER BY type ASC, importance DESC, updated_at DESC, id DESC
             LIMIT %s OFFSET %s
         """
@@ -332,23 +391,35 @@ class MemorydStore:
                 cur.execute(sql, tuple(params))
                 return [dict(row) for row in cur.fetchall()]
 
-    def list_muids(self, limit: int = 200) -> list[str]:
+    def list_muids(
+        self,
+        limit: int = 200,
+        *,
+        envid: str | None = None,
+        include_global: bool = False,
+        all_envids: bool = False,
+    ) -> list[str]:
         """Return distinct MUID values stored in memoryd records.
 
-        Input: result limit.
+        Input: result limit and optional scope filters.
         Output: ordered MUID list.
         """
 
         with self._conn() as conn:
             with conn.cursor() as cur:
+                where: list[str] = []
+                params: list[Any] = []
+                self._append_visible_envid_clause(where, params, envid, include_global=include_global, all_envids=all_envids)
+                where_sql = ""
+                if where:
+                    where_sql = "WHERE " + " AND ".join(where)
                 cur.execute(
-                    """
-                    SELECT DISTINCT muid
-                    FROM memoryd_records
-                    ORDER BY muid ASC
-                    LIMIT %s
-                    """,
-                    (max(1, int(limit)),),
+                    (
+                        "SELECT DISTINCT muid FROM memoryd_records "
+                        + where_sql
+                        + " ORDER BY muid ASC LIMIT %s"
+                    ),
+                    tuple(params + [max(1, int(limit))]),
                 )
                 return [str(row["muid"]) for row in cur.fetchall() if str(row.get("muid") or "").strip()]
 
@@ -365,7 +436,7 @@ class MemorydStore:
                 row = cur.fetchone()
                 return int((row or {}).get("count", 0) or 0)
 
-    def find_pending_tasks_by_key(self, muid: str, caller_tag: str | None = None) -> list[dict[str, Any]]:
+    def find_pending_tasks_by_key(self, muid: str, caller_tag: str | None = None, envid: str | None = None) -> list[dict[str, Any]]:
         """Find pending tasks for one (muid, caller_tag) key.
 
         Input: muid and optional caller tag.
@@ -374,26 +445,22 @@ class MemorydStore:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
+                where = ["muid=%s", "status='pending'"]
+                params: list[Any] = [muid]
+                self._append_exact_envid_clause(where, params, envid)
                 if caller_tag is None:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM memoryd_tasks
-                        WHERE muid=%s AND status='pending' AND caller_tag IS NULL
-                        ORDER BY created_at ASC, task_id ASC
-                        """,
-                        (muid,),
-                    )
+                    where.append("caller_tag IS NULL")
                 else:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM memoryd_tasks
-                        WHERE muid=%s AND status='pending' AND caller_tag=%s
-                        ORDER BY created_at ASC, task_id ASC
-                        """,
-                        (muid, caller_tag),
-                    )
+                    where.append("caller_tag=%s")
+                    params.append(caller_tag)
+                cur.execute(
+                    (
+                        "SELECT * FROM memoryd_tasks WHERE "
+                        + " AND ".join(where)
+                        + " ORDER BY created_at ASC, task_id ASC"
+                    ),
+                    tuple(params),
+                )
                 return [dict(row) for row in cur.fetchall()]
 
     def delete_task(self, task_id: str) -> None:
@@ -428,7 +495,16 @@ class MemorydStore:
                 row = cur.fetchone()
                 return dict(row) if row else None
 
-    def prune_records(self, muid: str, type_name: str, max_record_count: int, max_content_length: int, conn: Any | None = None) -> int:
+    def prune_records(
+        self,
+        muid: str,
+        type_name: str,
+        max_record_count: int,
+        max_content_length: int,
+        *,
+        envid: str | None = None,
+        conn: Any | None = None,
+    ) -> int:
         """Enforce per-MUID/type retention limits.
 
         Input: muid, type, and limits.
@@ -437,14 +513,16 @@ class MemorydStore:
 
         def _select_rows(active_conn: Any) -> list[dict[str, Any]]:
             with active_conn.cursor() as cur:
+                where = ["muid=%s", "type=%s"]
+                params: list[Any] = [muid, type_name]
+                self._append_exact_envid_clause(where, params, envid)
                 cur.execute(
-                    """
-                    SELECT id, title, body, importance, created_at
-                    FROM memoryd_records
-                    WHERE muid=%s AND type=%s
-                    ORDER BY importance ASC, created_at ASC, id ASC
-                    """,
-                    (muid, type_name),
+                    (
+                        "SELECT id, title, body, importance, created_at FROM memoryd_records WHERE "
+                        + " AND ".join(where)
+                        + " ORDER BY importance ASC, created_at ASC, id ASC"
+                    ),
+                    tuple(params),
                 )
                 return [dict(row) for row in cur.fetchall()]
 
@@ -513,7 +591,7 @@ class MemorydStore:
             "info",
             (
                 "create memory task params "
-                f"task_id={task.get('task_id')} muid={task.get('muid')} caller_tag={task.get('caller_tag')} "
+                f"task_id={task.get('task_id')} envid={self._normalize_envid(task.get('envid')) or '<global>'} muid={task.get('muid')} caller_tag={task.get('caller_tag')} "
                 f"work_hash={task.get('work_hash')} "
                 f"provider={provider or '<default>'} model={model or '<default>'} "
                 f"temperature={temperature if temperature is not None else '<default>'} "
@@ -540,14 +618,15 @@ class MemorydStore:
                 cur.execute(
                     """
                     INSERT INTO memoryd_tasks(
-                                            task_id, muid, caller_tag, work_hash, request_text, phase, provider, model,
+                                            task_id, envid, muid, caller_tag, work_hash, request_text, phase, provider, model,
                                             temperature, top_p, repetition_penalty, repeat_last_n, max_tokens, num_predict,
                                             seed, presence_penalty, frequency_penalty, top_k, min_p,
                                             tools, context_types, requested_types, source_context, final_response, status, prio
-                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                     """,
                     (
                         task["task_id"],
+                        self._normalize_envid(task.get("envid")),
                         task["muid"],
                         task.get("caller_tag"),
                         task.get("work_hash"),
@@ -580,6 +659,7 @@ class MemorydStore:
         muid: str,
         caller_tag: str | None = None,
         work_hash: str | None = None,
+        envid: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find in-flight tasks for one MUID by caller_tag/work_hash.
 
@@ -591,6 +671,7 @@ class MemorydStore:
             return []
         where: list[str] = ["muid=%s", "status IN ('pending','running')"]
         params: list[Any] = [muid]
+        self._append_exact_envid_clause(where, params, envid)
         keys: list[str] = []
         if caller_tag is not None:
             keys.append("caller_tag=%s")
@@ -654,7 +735,15 @@ class MemorydStore:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
-    def list_active_tasks(self, envid: str | None = None, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+    def list_active_tasks(
+        self,
+        envid: str | None = None,
+        *,
+        include_global: bool = False,
+        all_envids: bool = False,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         """List pending and running memoryd tasks.
 
         Input: optional envid filter and page bounds.
@@ -663,10 +752,7 @@ class MemorydStore:
 
         where = ["status IN ('pending','running')"]
         params: list[Any] = []
-        clean_envid = str(envid or "").strip()
-        if clean_envid:
-            where.append("COALESCE(source_context->>'envid', '') = %s")
-            params.append(clean_envid)
+        self._append_visible_envid_clause(where, params, envid, include_global=include_global, all_envids=all_envids)
         where_sql = "WHERE " + " AND ".join(where)
         safe_limit = max(1, min(500, int(limit)))
         safe_offset = max(0, int(offset))

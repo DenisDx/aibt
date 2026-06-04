@@ -222,6 +222,30 @@ class MemoryExecutorAgentHelpersTest(unittest.TestCase):
         self.assertEqual(outcome.queued_count, 0)
         self.assertEqual(svc.queue_state_calls, [("default", "gpt-test", 8)])
 
+    def test_resolve_task_memoryd_types_keeps_muid_prefixed_specs(self) -> None:
+        self.agent.app_config = {
+            "root": self.tmpdir.name,
+            "memoryd": {
+                "items": {
+                    "news": {"enabled": True},
+                    "todo": {"enabled": True, "manual_only": True},
+                }
+            },
+            "agents": {
+                "items": {
+                    "memory_executor": {
+                        "memoryd": {
+                            "update_types": ["shared:news", "shared:todo", "shared:missing"],
+                        }
+                    }
+                }
+            },
+        }
+
+        resolved = self.agent._resolve_task_memoryd_types({}, "env-a", "update_types")
+
+        self.assertEqual(resolved, ["shared:news"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ from core.logging_utils import log, register_log_listener, unregister_log_listen
 from core.envid_runtime import build_effective_config
 from memory.api import get_memory_service
 from memoryd import get_memoryd_service
+from memoryd.schemas import normalize_memoryd_type_specs, split_memoryd_type_spec
 
 
 def _utcnow() -> datetime:
@@ -327,7 +328,7 @@ class WebUIServer:
         """Return memoryd service bound to an effective config for one envid."""
 
         effective = build_effective_config(self.config, envid)
-        return get_memoryd_service(self.root_dir, effective)
+        return get_memoryd_service(self.root_dir, effective, current_envid=envid)
 
     @staticmethod
     def _memoryd_enabled_types(effective_config: dict[str, Any]) -> list[str]:
@@ -383,13 +384,18 @@ class WebUIServer:
         memoryd_cfg = agent_cfg.get("memoryd", {}) if isinstance(agent_cfg, dict) else {}
         raw = memoryd_cfg.get(key) if isinstance(memoryd_cfg, dict) else None
         if raw is None:
-            requested = list(default_types)
+            requested = normalize_memoryd_type_specs(default_types)
         elif isinstance(raw, list):
-            requested = [str(item).strip().lower() for item in raw if str(item).strip()]
+            requested = normalize_memoryd_type_specs(raw)
         else:
-            requested = list(default_types)
+            requested = normalize_memoryd_type_specs(default_types)
         allowed = {str(x).strip().lower() for x in allowed_types if str(x).strip()}
-        return sorted(item for item in set(requested) if item in allowed)
+        out: list[str] = []
+        for item in requested:
+            _, type_name = split_memoryd_type_spec(item)
+            if type_name in allowed and item not in out:
+                out.append(item)
+        return out
 
     def _memory_executor_store_for_envid(self, envid: str | None = None):
         """Return memory_executor store bound to effective config for one envid."""
@@ -1175,13 +1181,17 @@ class WebUIServer:
         @app.get("/api/memoryd/muids")
         async def api_memoryd_muids(envid: str = "", session: dict = Depends(require)):
             try:
-                svc = self._memoryd_service_for_envid(envid.strip() or None)
-                items = svc.list_muids(limit=500)
-                effective = build_effective_config(self.config, envid.strip() or None)
+                raw_envid = envid.strip()
+                all_envids = raw_envid == "__all__"
+                scope_envid = None if raw_envid in {"", "__all__"} else raw_envid
+                svc = self._memoryd_service_for_envid(scope_envid)
+                items = svc.list_muids(limit=500, envid=scope_envid, all_envids=all_envids)
+                effective = build_effective_config(self.config, scope_envid)
                 memoryd_cfg = effective.get("memoryd", {}) if isinstance(effective, dict) else {}
                 return {
                     "ok": True,
-                    "envid": envid.strip() or None,
+                    "envid": scope_envid,
+                    "all_envids": all_envids,
                     "default_muid": str(memoryd_cfg.get("muid") or "default"),
                     "items": items,
                 }
@@ -1190,20 +1200,29 @@ class WebUIServer:
 
         @app.get("/api/memoryd/records")
         async def api_memoryd_records(
-            muid: str,
+            muid: str = "",
             types: str = "",
             envid: str = "",
             limit: int = 100,
             offset: int = 0,
             session: dict = Depends(require),
         ):
-            clean_muid = muid.strip()
-            if not clean_muid:
-                raise HTTPException(status_code=400, detail="muid is required")
+            raw_envid = envid.strip()
+            all_envids = raw_envid == "__all__"
+            scope_envid = None if raw_envid in {"", "__all__"} else raw_envid
+            raw_muid = muid.strip()
+            clean_muid = None if raw_muid in {"", "__all__"} else raw_muid
             raw_types = [item.strip() for item in types.split(",") if item.strip()]
             try:
-                svc = self._memoryd_service_for_envid(envid.strip() or None)
-                page = svc.list_records(clean_muid, types=raw_types or None, offset=max(0, int(offset)), limit=max(1, min(200, int(limit))))
+                svc = self._memoryd_service_for_envid(scope_envid)
+                page = svc.list_records(
+                    clean_muid,
+                    types=raw_types or None,
+                    offset=max(0, int(offset)),
+                    limit=max(1, min(200, int(limit))),
+                    envid=scope_envid,
+                    all_envids=all_envids,
+                )
                 return {"ok": True, **page}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))

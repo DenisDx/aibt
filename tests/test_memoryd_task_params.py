@@ -73,15 +73,16 @@ class _QueueingStore:
         self.pending_rows = []
         self.return_inflight_on_caller_tag = False
         self.inflight_calls = []
+        self.pending_calls = []
 
-    def find_inflight_tasks(self, muid, caller_tag=None, work_hash=None):
-        self.inflight_calls.append((muid, caller_tag, work_hash))
+    def find_inflight_tasks(self, muid, caller_tag=None, work_hash=None, envid=None):
+        self.inflight_calls.append((muid, caller_tag, work_hash, envid))
         if self.return_inflight_on_caller_tag and caller_tag:
             return [{"task_id": "existing-running"}]
         return []
 
-    def find_pending_tasks_by_key(self, muid, caller_tag=None):
-        _ = (muid, caller_tag)
+    def find_pending_tasks_by_key(self, muid, caller_tag=None, envid=None):
+        self.pending_calls.append((muid, caller_tag, envid))
         return list(self.pending_rows)
 
     def delete_task(self, task_id):
@@ -322,7 +323,7 @@ class MemorydTaskParamsTest(unittest.TestCase):
         )
 
         self.assertTrue(result.get("queued"))
-        self.assertEqual(svc.store.inflight_calls[0], ("m1", None, "work-2"))
+        self.assertEqual(svc.store.inflight_calls[0], ("m1", None, "work-2", None))
         self.assertEqual(svc.store.created_task.get("caller_tag"), "same-tag")
 
     def test_enqueue_update_replaces_pending_same_key(self) -> None:
@@ -346,6 +347,30 @@ class MemorydTaskParamsTest(unittest.TestCase):
 
         self.assertTrue(result.get("queued"))
         self.assertEqual(svc.store.deleted_task_ids, ["pending-1"])
+
+    def test_enqueue_update_scopes_pending_replacement_by_envid(self) -> None:
+        svc = MemorydService.__new__(MemorydService)
+        svc.initialize = lambda: None
+        svc._normalize_muid = lambda muid: str(muid or "default")
+        svc._normalize_types = lambda values: [str(v) for v in (values or [])]
+        svc._memoryd_model_cfg = lambda: {"memory_task_prio": 8, "queue": {"cancel_policy": "cancel_previous_same_muid"}}
+        svc.store = _QueueingStore()
+        svc.store.pending_rows = [{"task_id": "pending-1"}]
+        svc.current_envid = "env-a"
+        svc._dispatch_after_enqueue_async = lambda task_id: None
+
+        result = svc.enqueue_update(
+            source_context={"adapter": "test"},
+            final_response="ok",
+            muid="m1",
+            caller_tag="same-tag",
+            request_text="Write memories",
+            types=["semantic"],
+        )
+
+        self.assertTrue(result.get("queued"))
+        self.assertEqual(svc.store.pending_calls, [("m1", "same-tag", "env-a")])
+        self.assertEqual(svc.store.created_task.get("envid"), "env-a")
 
     def test_process_task_ignores_late_llm_response_after_restart(self) -> None:
         svc = MemorydService.__new__(MemorydService)
