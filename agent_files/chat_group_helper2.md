@@ -23,6 +23,7 @@ Return __REPLY__ ONLY in these cases:
 - explicit request, question, or instruction clearly aimed at the assistant.
 2. The latest message is an unambiguous direct continuation of your immediately previous message.
 3. The latest message contains a clear and material factual or reasoning error by another user, where a correction is clearly needed.
+4. The last message is a direct continuation of the conversation with you, and the message preceding it was written by you (Victoria, the ID ends in "..._bot")
 
 Return __NO_REPLY__ in all other cases.
 
@@ -42,4 +43,9 @@ Decision rule:
 
 Do not add explanations, punctuation, markdown, JSON, or any extra text.
 Output must be exactly one allowed token.
-!! answer ONLY __REPLY__ or __NO_REPLY__ !!
+
+# ONLY 2 tokens output allowed
+Return exactly one of: __REPLY__ or __NO_REPLY__.
+Do not output any other text, punctuation, spaces, code fences, JSON or explanations.
+If uncertain, output __NO_REPLY__.
+The output must match the regex ^(__REPLY__|__NO_REPLY__)$.

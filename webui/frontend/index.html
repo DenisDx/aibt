@@ -123,8 +123,8 @@
     .alog-block { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--bg); min-height: 140px; overflow: auto; resize: vertical; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 
     /* ── Memoryd page ─────────────────────────────────────── */
-    .memoryd-layout { display: grid; grid-template-columns: minmax(320px, 380px) 1fr; gap: 12px; }
-    .memoryd-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .memoryd-layout { display: grid; grid-template-columns: minmax(320px, 380px) 1fr; gap: 12px; flex: 1; min-height: 0; height: 100%; }
+    .memoryd-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
     .memoryd-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .memoryd-toolbar select, .memoryd-toolbar input, .memoryd-panel input, .memoryd-panel textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
     .memoryd-request-params-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -137,6 +137,8 @@
     .memoryd-table th { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.03); }
     .memoryd-table td { border-bottom: 1px solid var(--border); }
     .memoryd-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; min-height: 180px; max-height: 380px; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .memoryd-records-right { min-height: 0; }
+    .memoryd-record-output { flex: 1 1 auto; min-height: 0; height: 100%; max-height: none; resize: none; }
     .memoryd-tasks-layout { display: flex; gap: 0; min-height: 0; height: 100%; }
     .memoryd-tasks-left { min-width: 280px; flex: 0 0 30%; }
     .memoryd-tasks-right { min-width: 320px; flex: 1 1 auto; min-height: 0; }
@@ -164,10 +166,34 @@
     }
     .memory-executor-splitter:hover,
     .memory-executor-splitter.dragging { background: linear-gradient(to right, transparent 0, var(--accent) 45%, var(--accent) 55%, transparent 100%); }
-    .memory-executor-form { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; }
-    .memory-executor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .memory-executor-form {
+        display: grid;
+        grid-template-columns: minmax(340px, 430px) minmax(0, 1fr);
+        gap: 12px;
+        min-height: 0;
+        height: 100%;
+        align-items: stretch;
+        overflow: hidden;
+      }
+      .memory-executor-pane { min-height: 0; min-width: 0; }
+      .memory-executor-pane-scroll {
+        height: 100%;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 4px;
+      }
+      .memory-executor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; min-width: 0; }
     .memory-executor-llm-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .memory-executor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .memory-executor-field-span-2 { grid-column: 1 / -1; }
+      .memory-executor-compact-row {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: minmax(0, 110px) minmax(0, 150px) auto;
+        gap: 8px;
+        align-items: end;
+      }
     .memory-executor-field label { font-size: 12px; color: var(--muted); }
     .memory-executor-field input,
     .memory-executor-field select,
@@ -188,10 +214,17 @@
       border-radius: 6px;
       background: rgba(255,255,255,.02);
     }
-    .memory-executor-text-wrap { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-height: 180px; }
+    .memory-executor-text-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-height: 0;
+      height: 100%;
+      align-self: stretch;
+    }
     .memory-executor-text {
       flex: 1 1 auto;
-      min-height: 160px;
+      min-height: 0;
       height: 100%;
       resize: none;
       overflow: auto;
@@ -226,10 +259,12 @@
       .memoryd-tasks-left,
       .memoryd-tasks-right { flex-basis: auto; }
       .memoryd-tasks-splitter { display: none; }
+      .memory-executor-form { grid-template-columns: 1fr; }
       .memory-executor-layout { flex-direction: column; }
       .memory-executor-right { flex-basis: auto; }
       .memory-executor-splitter { display: none; }
       .memory-executor-grid { grid-template-columns: 1fr; }
+      .memory-executor-compact-row { grid-template-columns: 1fr; }
       .memoryd-request-params-grid { grid-template-columns: 1fr; }
       .memory-executor-llm-grid { grid-template-columns: 1fr; }
     }
@@ -504,7 +539,7 @@
     <!-- Memoryd page -->
     <div id="page-memoryd" class="page">
       <div class="memoryd-layout">
-        <div class="memoryd-panel">
+        <div class="memoryd-panel memoryd-records-right">
           <div class="memoryd-toolbar">
             <label for="memoryd-envid-select">Envid</label>
             <select id="memoryd-envid-select" onchange="loadMemorydPage(true)"></select>
@@ -608,7 +643,7 @@
             </table>
           </div>
           <label for="memoryd-record-output">Selected record JSON</label>
-          <textarea id="memoryd-record-output" class="memoryd-output"></textarea>
+          <textarea id="memoryd-record-output" class="memoryd-output memoryd-record-output"></textarea>
         </div>
       </div>
     </div>
@@ -690,8 +725,9 @@
           <div id="memory-executor-meta" class="agent-meta">Memory Executor status: unknown</div>
 
           <div class="memory-executor-form">
+            <div class="memory-executor-pane memory-executor-pane-scroll">
             <div class="memory-executor-grid">
-              <div class="memory-executor-field">
+              <div class="memory-executor-field memory-executor-field-span-2">
                 <label for="memory-executor-field-id-text">Task ID</label>
                 <div id="memory-executor-field-id-text" class="memory-executor-id-text">(new task)</div>
               </div>
@@ -705,7 +741,7 @@
                   <option value="">(base config)</option>
                 </select>
               </div>
-              <div class="memory-executor-field">
+              <div class="memory-executor-field memory-executor-field-span-2">
                 <label for="memory-executor-field-muid">MUID</label>
                 <div style="display:flex; gap:8px;">
                   <input id="memory-executor-field-muid" type="text" placeholder="default" style="flex:1; min-width:120px;">
@@ -714,16 +750,24 @@
                   </select>
                 </div>
               </div>
-              <div class="memory-executor-field">
-                <label for="memory-executor-field-period">Period (sec)</label>
-                <input id="memory-executor-field-period" type="number" min="0" step="1" placeholder="3600">
-              </div>
-              <div class="memory-executor-field">
-                <label for="memory-executor-field-policy">Execution policy</label>
-                <select id="memory-executor-field-policy">
-                  <option value="idle">idle</option>
-                  <option value="always">always</option>
-                </select>
+              <div class="memory-executor-compact-row">
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-period">Period (sec)</label>
+                  <input id="memory-executor-field-period" type="number" min="0" step="1" placeholder="3600">
+                </div>
+                <div class="memory-executor-field">
+                  <label for="memory-executor-field-policy">Execution policy</label>
+                  <select id="memory-executor-field-policy">
+                    <option value="idle">idle</option>
+                    <option value="always">always</option>
+                  </select>
+                </div>
+                <div class="memory-executor-field" style="justify-content:flex-end;">
+                  <label class="memory-executor-check">
+                    <input id="memory-executor-field-enabled" type="checkbox" checked>
+                    enabled
+                  </label>
+                </div>
               </div>
               <div class="memory-executor-field">
                 <label for="memory-executor-field-todo-title">Todo title</label>
@@ -787,30 +831,25 @@
                   <input id="memory-executor-field-min-p" type="number" step="any" placeholder="(optional)">
                 </div>
               </div>
-              <div class="memory-executor-field">
+              <div class="memory-executor-field memory-executor-field-span-2">
                 <label for="memory-executor-field-tools">Tools (comma-separated, empty = null)</label>
                 <input id="memory-executor-field-tools" type="text" placeholder="search,fetch">
               </div>
               <div id="memory-executor-types-hint" class="memory-executor-types-hint">
                 Allowed types for selected envid: episodic, semantic, summaries, profiles
               </div>
-              <div class="memory-executor-field">
+              <div class="memory-executor-field memory-executor-field-span-2">
                 <label for="memory-executor-field-context-types">Context types (comma-separated; supports type or muid:type)</label>
                 <input id="memory-executor-field-context-types" type="text" placeholder="semantic,profiles,todo">
               </div>
-              <div class="memory-executor-field">
+              <div class="memory-executor-field memory-executor-field-span-2">
                 <label for="memory-executor-field-update-types">Update types (comma-separated; supports type or muid:type)</label>
                 <input id="memory-executor-field-update-types" type="text" placeholder="semantic,profiles">
               </div>
-              <div class="memory-executor-field" style="justify-content:flex-end;">
-                <label class="memory-executor-check">
-                  <input id="memory-executor-field-enabled" type="checkbox" checked>
-                  enabled
-                </label>
-              </div>
+            </div>
             </div>
 
-            <div class="memory-executor-text-wrap">
+            <div class="memory-executor-pane memory-executor-text-wrap">
               <label for="memory-executor-field-request-text">Request text</label>
               <textarea id="memory-executor-field-request-text" class="memory-executor-text" placeholder="Task prompt text"></textarea>
             </div>
